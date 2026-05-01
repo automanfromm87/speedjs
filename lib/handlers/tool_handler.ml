@@ -27,7 +27,7 @@ open Types
 type call_args = {
   tool : tool_def;
   input : Yojson.Safe.t;
-  use_id : string;
+  use_id : Id.Tool_use_id.t;
 }
 
 (** Chain result. Inside the chain, errors are typed [Error.t] for
@@ -256,10 +256,23 @@ let perform_tool_started_tick ~name ~use_id ~input =
   let digest =
     Digest.to_hex (Digest.string (Yojson.Safe.to_string input))
   in
-  safe_tick (Tool_started { name; use_id; input_digest = digest })
+  safe_tick
+    (Tool_started
+       {
+         name;
+         use_id = Id.Tool_use_id.to_string use_id;
+         input_digest = digest;
+       })
 
 let perform_tool_finished_ticks ~tool ~use_id ~ok ~duration =
-  safe_tick (Tool_finished { name = tool.name; use_id; ok; duration });
+  safe_tick
+    (Tool_finished
+       {
+         name = tool.name;
+         use_id = Id.Tool_use_id.to_string use_id;
+         ok;
+         duration;
+       });
   match tool.timeout_sec with
   | Some budget when duration > budget ->
       safe_tick (Tool_timeout { name = tool.name; duration; budget })
@@ -292,8 +305,9 @@ let with_logging ?(on_log = prerr_endline) (inner : t) : t =
 (** Apply [chain] to a single use, converting [Error.t] back to a plain
     string at the boundary (for the legacy effect signature). Returns
     the [tool_handler_result] tuple expected by [Effects.Tool_calls]. *)
-let dispatch_one ~chain ~tools ((id, name, input) : string * string * Yojson.Safe.t)
-    : string * tool_handler_result =
+let dispatch_one ~chain ~tools
+    ((id, name, input) : Id.Tool_use_id.t * string * Yojson.Safe.t)
+    : Id.Tool_use_id.t * tool_handler_result =
   let result =
     match List.find_opt (fun (t : tool_def) -> t.name = name) tools with
     | None ->

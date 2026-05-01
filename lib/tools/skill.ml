@@ -334,19 +334,23 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
           | _ -> Error "input must be JSON object");
     }
 
-(** Build the [<available_skills>] block we splice into the system prompt.
+(** Build the body of the skill index block. Returns RAW body without
+    any [<available_skills>] tag — the caller (typically
+    [Context.add_system_block ~name:"available_skills"]) wraps it. This
+    keeps wrapping consistent and avoids the double-tag bug.
 
-    Returns empty string when no skills, so callers can append unconditionally. *)
+    Returns empty string when no skills, so callers can append
+    unconditionally. *)
 let render_index (skills : t list) : string =
   match skills with
   | [] -> ""
   | _ ->
       let header =
-        "<available_skills>\n\
-         Domain knowledge libraries you can pull on demand via the \
-         `load_skill` tool. The body becomes available on the next turn and \
-         stays in context for the rest of the task. Only load a skill when \
-         the work falls into its domain — don't load all of them.\n"
+        "Domain knowledge libraries you can pull on demand via the \
+         `load_skill` tool. The body becomes available on the next turn \
+         and stays in context for the rest of the task. Only load a \
+         skill when the work falls into its domain — don't load all of \
+         them.\n"
       in
       let lines =
         List.map
@@ -359,4 +363,4 @@ let render_index (skills : t list) : string =
             Printf.sprintf "- **%s** — %s" s.name first_line)
           skills
       in
-      header ^ String.concat "\n" lines ^ "\n</available_skills>"
+      header ^ String.concat "\n" lines

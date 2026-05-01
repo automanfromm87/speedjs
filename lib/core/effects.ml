@@ -11,8 +11,8 @@ type _ Effect.t +=
       (** Call the LLM with messages + tools, optionally overriding the
           system prompt and forcing a specific [tool_choice]. *)
   | Tool_calls :
-      (string * string * Yojson.Safe.t) list
-      -> (string * tool_handler_result) list Effect.t
+      (Id.Tool_use_id.t * string * Yojson.Safe.t) list
+      -> (Id.Tool_use_id.t * tool_handler_result) list Effect.t
       (** Execute one or more tools and return their results in input
           order. Each tuple is [(tool_use_id, name, input)]; output is
           [(tool_use_id, result)]. Single-tool case is just a 1-element

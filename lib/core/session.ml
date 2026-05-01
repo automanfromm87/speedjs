@@ -15,7 +15,7 @@ open Types
 
 type t = {
   messages : message list;
-  pending_tool_use_id : string option;
+  pending_tool_use_id : Id.Tool_use_id.t option;
   model : string;
 }
 
@@ -29,7 +29,7 @@ let to_json (s : t) : Yojson.Safe.t =
       ("messages", `List (List.map message_to_json s.messages));
       ( "pending_tool_use_id",
         match s.pending_tool_use_id with
-        | Some id -> `String id
+        | Some id -> `String (Id.Tool_use_id.to_string id)
         | None -> `Null );
     ]
 
@@ -52,8 +52,8 @@ let message_of_json = function
                     | Some (`String "tool_result") ->
                         let tool_use_id =
                           match List.assoc_opt "tool_use_id" fs with
-                          | Some (`String s) -> s
-                          | _ -> ""
+                          | Some (`String s) -> Id.Tool_use_id.of_string s
+                          | _ -> Id.Tool_use_id.of_string ""
                         in
                         let content =
                           match List.assoc_opt "content" fs with
@@ -89,7 +89,7 @@ let of_json (j : Yojson.Safe.t) : t =
       in
       let pending_tool_use_id =
         match List.assoc_opt "pending_tool_use_id" fields with
-        | Some (`String s) -> Some s
+        | Some (`String s) -> Some (Id.Tool_use_id.of_string s)
         | _ -> None
       in
       { messages; pending_tool_use_id; model }

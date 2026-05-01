@@ -20,7 +20,7 @@ let execute_tool_calls = Step.dispatch_tool_uses
     halts mid-conversation; [run_session] catches this and returns
     [Outcome_waiting]. *)
 exception Wait_for_user of {
-  tool_use_id : string;
+  tool_use_id : Id.Tool_use_id.t;
   question : string;
   ctx_so_far : Context.t;
 }

@@ -62,7 +62,7 @@ let test_step_returns_continue_on_normal_tool_use () =
     mk_resp ~stop_reason:Tool_use_stop
       [
         Tool_use
-          { id = "u1"; name = "read_file"; input = `Assoc [ ("p", `String "/x") ] };
+          { id = Id.Tool_use_id.of_string "u1"; name = "read_file"; input = `Assoc [ ("p", `String "/x") ] };
       ]
   in
   let outcome =
@@ -84,7 +84,7 @@ let test_step_returns_terminal_tool_when_terminal_called () =
       [
         Tool_use
           {
-            id = "u1";
+            id = Id.Tool_use_id.of_string "u1";
             name = "submit_task_result";
             input = `Assoc [ ("ok", `Bool true) ];
           };
@@ -108,7 +108,7 @@ let test_step_returns_wait_for_user_on_ask_user () =
       [
         Tool_use
           {
-            id = "u1";
+            id = Id.Tool_use_id.of_string "u1";
             name = Tools.ask_user_name;
             input = `Assoc [ ("question", `String "what color?") ];
           };
@@ -162,7 +162,7 @@ let test_single_tool_call () =
           Text "Let me check.";
           Tool_use
             {
-              id = "toolu_1";
+              id = Id.Tool_use_id.of_string "toolu_1";
               name = "calculator";
               input = `Assoc [ ("expression", `String "2+2") ];
             };
@@ -198,7 +198,7 @@ let test_tool_error_surfaced () =
         [
           Tool_use
             {
-              id = "toolu_2";
+              id = Id.Tool_use_id.of_string "toolu_2";
               name = "calculator";
               input = `Assoc [ ("expression", `String "bad") ];
             };
@@ -232,7 +232,7 @@ let test_max_iterations () =
         [
           Tool_use
             {
-              id = "toolu_x";
+              id = Id.Tool_use_id.of_string "toolu_x";
               name = "calculator";
               input = `Assoc [ ("expression", `String "1+1") ];
             };
@@ -306,7 +306,7 @@ let test_planner_parses_submit_plan () =
         [
           Tool_use
             {
-              id = "toolu_p";
+              id = Id.Tool_use_id.of_string "toolu_p";
               name = "submit_plan";
               input =
                 `Assoc
@@ -353,19 +353,19 @@ let test_parallel_tool_batch_dispatched () =
         [
           Tool_use
             {
-              id = "u1";
+              id = Id.Tool_use_id.of_string "u1";
               name = "calculator";
               input = `Assoc [ ("expression", `String "1+1") ];
             };
           Tool_use
             {
-              id = "u2";
+              id = Id.Tool_use_id.of_string "u2";
               name = "current_time";
               input = `Assoc [];
             };
           Tool_use
             {
-              id = "u3";
+              id = Id.Tool_use_id.of_string "u3";
               name = "calculator";
               input = `Assoc [ ("expression", `String "2+2") ];
             };
@@ -464,7 +464,7 @@ let test_run_session_outcome_waiting () =
           Text "I need clarification.";
           Tool_use
             {
-              id = "toolu_ask";
+              id = Id.Tool_use_id.of_string "toolu_ask";
               name = "ask_user";
               input =
                 `Assoc [ ("question", `String "Which file?") ];
@@ -482,7 +482,7 @@ let test_run_session_outcome_waiting () =
   in
   (match outcome with
   | Outcome_waiting { tool_use_id; question; messages } ->
-      assert (tool_use_id = "toolu_ask");
+      assert (Id.Tool_use_id.to_string tool_use_id = "toolu_ask");
       assert (question = "Which file?");
       assert (List.length messages = 2)
   | _ -> failwith "expected Outcome_waiting");
@@ -502,7 +502,7 @@ let test_session_resume_with_tool_result () =
             Text "ok let me ask";
             Tool_use
               {
-                id = "toolu_q";
+                id = Id.Tool_use_id.of_string "toolu_q";
                 name = "ask_user";
                 input = `Assoc [ ("question", `String "?") ];
               };
@@ -513,7 +513,7 @@ let test_session_resume_with_tool_result () =
   let prior_session =
     Session.{
       messages = prior_messages;
-      pending_tool_use_id = Some "toolu_q";
+      pending_tool_use_id = Some (Id.Tool_use_id.of_string "toolu_q");
       model = "test";
     }
   in
@@ -522,7 +522,7 @@ let test_session_resume_with_tool_result () =
   let last_msg = List.nth session.messages (List.length session.messages - 1) in
   (match last_msg.content with
   | [ Tool_result { tool_use_id; content; _ } ] ->
-      assert (tool_use_id = "toolu_q");
+      assert (Id.Tool_use_id.to_string tool_use_id = "toolu_q");
       assert (content = "/tmp/x.py")
   | _ -> failwith "expected Tool_result block");
   print_endline "✓ Session.append_input answers pending ask_user"
@@ -624,7 +624,7 @@ let test_run_for_task_explicit_submit () =
         [
           Tool_use
             {
-              id = "u_submit";
+              id = Id.Tool_use_id.of_string "u_submit";
               name = "submit_task_result";
               input =
                 `Assoc
@@ -658,7 +658,7 @@ let test_run_for_task_explicit_failure () =
         [
           Tool_use
             {
-              id = "u_submit";
+              id = Id.Tool_use_id.of_string "u_submit";
               name = "submit_task_result";
               input =
                 `Assoc
@@ -756,11 +756,13 @@ let test_skill_render_index_with_skills () =
   in
   let idx = Skill.render_index skills in
   assert (String.length idx > 0);
-  assert (contains idx "<available_skills>");
+  (* render_index returns RAW body — the caller wraps via add_system_block.
+     So <available_skills> tag should NOT be in the body. *)
+  assert (not (contains idx "<available_skills>"));
   assert (contains idx "**alpha**");
   assert (contains idx "**beta**");
   assert (contains idx "First skill.");
-  print_endline "✓ Skill.render_index produces well-formed index block"
+  print_endline "✓ Skill.render_index produces well-formed index body"
 
 let test_load_skill_tool_dispatch () =
   let skills =
@@ -888,10 +890,13 @@ let test_conversation_push_assistant_with_tool_use () =
   let c = Speedjs.Conversation.push_user_text c "go" in
   let c =
     Speedjs.Conversation.push_assistant c
-      [ Tool_use { id = "u1"; name = "tool"; input = `Assoc [] } ]
+      [ Tool_use { id = Id.Tool_use_id.of_string "u1"; name = "tool"; input = `Assoc [] } ]
   in
   assert (Speedjs.Conversation.is_dangling c);
-  assert (Speedjs.Conversation.pending_tool_use_ids c = [ "u1" ]);
+  assert (
+    List.map Id.Tool_use_id.to_string
+      (Speedjs.Conversation.pending_tool_use_ids c)
+    = [ "u1" ]);
   print_endline "✓ Conversation: Assistant with Tool_use → S_has_dangling"
 
 let test_conversation_close_dangling_with_ack () =
@@ -901,7 +906,7 @@ let test_conversation_close_dangling_with_ack () =
     Speedjs.Conversation.push_assistant c
       [
         Text "submitting";
-        Tool_use { id = "u1"; name = "submit"; input = `Assoc [] };
+        Tool_use { id = Id.Tool_use_id.of_string "u1"; name = "submit"; input = `Assoc [] };
       ]
   in
   assert (Speedjs.Conversation.is_dangling c);
@@ -915,7 +920,10 @@ let test_conversation_close_dangling_with_ack () =
   let last = List.nth msgs (List.length msgs - 1) in
   assert (last.role = User);
   (match last.content with
-  | [ Tool_result { tool_use_id = "u1"; content = "ok"; is_error = false }; Text "next task" ] -> ()
+  | [ Tool_result { tool_use_id; content = "ok"; is_error = false };
+      Text "next task" ]
+    when Id.Tool_use_id.to_string tool_use_id = "u1" ->
+      ()
   | _ -> failwith "close_dangling_with_ack didn't produce single merged User turn");
   print_endline
     "✓ Conversation.close_dangling_with_ack merges tool_result + text into one User turn"
@@ -925,7 +933,7 @@ let test_conversation_push_user_rejects_dangling () =
   let c = Speedjs.Conversation.push_user_text c "go" in
   let c =
     Speedjs.Conversation.push_assistant c
-      [ Tool_use { id = "u1"; name = "tool"; input = `Assoc [] } ]
+      [ Tool_use { id = Id.Tool_use_id.of_string "u1"; name = "tool"; input = `Assoc [] } ]
   in
   (try
      let _ = Speedjs.Conversation.push_user_text c "next task" in
@@ -946,7 +954,7 @@ let test_conversation_validate_catches_dangling_pattern () =
           [
             Text "done";
             Tool_use
-              { id = "u1"; name = "submit_task_result"; input = `Assoc [] };
+              { id = Id.Tool_use_id.of_string "u1"; name = "submit_task_result"; input = `Assoc [] };
           ];
       };
       user_text_message "task 2";
@@ -987,7 +995,7 @@ let test_conversation_tool_use_in_user_rejected () =
       {
         role = User;
         content =
-          [ Tool_use { id = "u1"; name = "x"; input = `Assoc [] } ];
+          [ Tool_use { id = Id.Tool_use_id.of_string "u1"; name = "x"; input = `Assoc [] } ];
       };
     ]
   in
@@ -1008,7 +1016,7 @@ let test_conversation_round_trip_legitimate_dangling () =
           [
             Text "done!";
             Tool_use
-              { id = "u_submit"; name = "submit_task_result"; input = `Assoc [] };
+              { id = Id.Tool_use_id.of_string "u_submit"; name = "submit_task_result"; input = `Assoc [] };
           ];
       };
     ]
@@ -1019,7 +1027,10 @@ let test_conversation_round_trip_legitimate_dangling () =
         ("of_messages should accept trailing dangling, got error: " ^ msg)
   | Ok c ->
       assert (Speedjs.Conversation.is_dangling c);
-      assert (Speedjs.Conversation.pending_tool_use_ids c = [ "u_submit" ]);
+      assert (
+        List.map Id.Tool_use_id.to_string
+          (Speedjs.Conversation.pending_tool_use_ids c)
+        = [ "u_submit" ]);
       print_endline
         "✓ Conversation.of_messages accepts trailing dangling (legitimate persisted state)"
 
@@ -1128,23 +1139,31 @@ let test_context_to_llm_args_carries_strategy () =
 let mk_user_text s : Speedjs.Types.message =
   { role = User; content = [ Text s ] }
 
-let mk_asst_tool_use id : Speedjs.Types.message =
+let mk_asst_tool_use (id : string) : Speedjs.Types.message =
   {
     role = Assistant;
     content =
       [
         Tool_use
-          { id; name = "noop"; input = `Assoc [ ("k", `String id) ] };
+          {
+            id = Id.Tool_use_id.of_string id;
+            name = "noop";
+            input = `Assoc [ ("k", `String id) ];
+          };
       ];
   }
 
-let mk_user_tool_result id : Speedjs.Types.message =
+let mk_user_tool_result (id : string) : Speedjs.Types.message =
   {
     role = User;
     content =
       [
         Tool_result
-          { tool_use_id = id; content = "ok " ^ id; is_error = false };
+          {
+            tool_use_id = Id.Tool_use_id.of_string id;
+            content = "ok " ^ id;
+            is_error = false;
+          };
       ];
   }
 
@@ -1663,7 +1682,7 @@ let test_tool_handler_with_timeout_aborts_slow_tool () =
   let chain = Tool_handler.direct |> Tool_handler.with_timeout in
   let start = Unix.gettimeofday () in
   let result =
-    chain { tool = slow_tool; input = `Assoc []; use_id = "u1" }
+    chain { tool = slow_tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u1" }
   in
   let elapsed = Unix.gettimeofday () -. start in
   (match result with
@@ -1758,7 +1777,7 @@ let test_recovery_prompt_includes_prior_failures_and_cycle () =
         [
           Tool_use
             {
-              id = "u1";
+              id = Id.Tool_use_id.of_string "u1";
               name = "submit_recovery";
               input =
                 `Assoc
@@ -1871,7 +1890,7 @@ let test_tool_handler_direct_classifies_errors () =
         Error "kaboom")
   in
   let args =
-    { Tool_handler.tool; input = `Assoc []; use_id = "u1" }
+    { Tool_handler.tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u1" }
   in
   (match Tool_handler.direct args with
   | Error err ->
@@ -1891,7 +1910,7 @@ let test_tool_handler_validation_rejects_non_object () =
         Ok "should not reach")
   in
   let chain = Tool_handler.with_validation Tool_handler.direct in
-  let args = { Tool_handler.tool; input = `String "not an object"; use_id = "u" } in
+  let args = { Tool_handler.tool; input = `String "not an object"; use_id = Id.Tool_use_id.of_string "u" } in
   (match chain args with
   | Error err ->
       assert (err.kind = Permanent);
@@ -1921,7 +1940,7 @@ let test_tool_handler_retry_only_for_idempotent () =
   calls := 0;
   let _ =
     chain
-      { tool = bad_tool; input = `Assoc []; use_id = "u" }
+      { tool = bad_tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u" }
   in
   assert (!calls = 1);  (* no retry for non-idempotent *)
 
@@ -1945,7 +1964,7 @@ let test_tool_handler_retry_only_for_idempotent () =
   attempts := 0;
   let r =
     chain2
-      { tool = good_tool; input = `Assoc []; use_id = "u" }
+      { tool = good_tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u" }
   in
   assert (!attempts = 3);
   (match r with Ok "got it" -> () | _ -> failwith "expected success");
@@ -1963,7 +1982,7 @@ let test_tool_handler_circuit_breaker_opens_after_threshold () =
       inner
   in
   let tool = mk_test_tool "broken" (fun _ -> Error "x") in
-  let args = { Tool_handler.tool; input = `Assoc []; use_id = "u" } in
+  let args = { Tool_handler.tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u" } in
   for _ = 1 to 3 do
     let _ = chain args in
     ()
@@ -1988,11 +2007,68 @@ let test_tool_handler_audit_observes_calls () =
       Tool_handler.direct
   in
   let _ =
-    chain { tool; input = `Assoc []; use_id = "u" }
+    chain { tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u" }
   in
   assert (!calls = [ "x" ]);
   assert (!results = [ ("x", true) ]);
   print_endline "✓ Tool_handler.with_audit fires on_call + on_result"
+
+(* ===== Typed tool builder ===== *)
+
+let test_make_typed_tool_decodes_input_and_runs_handler () =
+  (* A typed tool: input is a record { x; y }, handler adds them, output
+     is a string. Demonstrates that the input_decoder runs first and
+     errors propagate cleanly without the handler ever seeing bad JSON. *)
+  let calls = ref 0 in
+  let tool =
+    make_typed_tool ~name:"add"
+      ~description:"add two ints"
+      ~input_schema:
+        (`Assoc
+          [
+            ("type", `String "object");
+            ( "properties",
+              `Assoc
+                [
+                  ("x", `Assoc [ ("type", `String "integer") ]);
+                  ("y", `Assoc [ ("type", `String "integer") ]);
+                ] );
+          ])
+      ~input_decoder:(fun json ->
+        match json with
+        | `Assoc fs -> (
+            match (List.assoc_opt "x" fs, List.assoc_opt "y" fs) with
+            | Some (`Int a), Some (`Int b) -> Ok (a, b)
+            | _ -> Error "x and y must be ints")
+        | _ -> Error "input must be object")
+      ~handler:(fun (a, b) ->
+        incr calls;
+        Ok (string_of_int (a + b)))
+      ()
+  in
+  (* Happy path: typed handler receives unpacked tuple. *)
+  (match tool.handler (`Assoc [ ("x", `Int 5); ("y", `Int 7) ]) with
+  | Ok "12" -> ()
+  | Ok s -> failwith ("unexpected output: " ^ s)
+  | Error e -> failwith ("expected Ok, got Error: " ^ e));
+  assert (!calls = 1);
+  (* Decoder error: handler never invoked, error wrapped. *)
+  (match tool.handler (`String "not an object") with
+  | Error msg ->
+      assert (
+        let needle = "invalid input" in
+        let nl = String.length needle and ml = String.length msg in
+        let rec loop i =
+          if i + nl > ml then false
+          else if String.sub msg i nl = needle then true
+          else loop (i + 1)
+        in
+        loop 0)
+  | Ok _ -> failwith "expected decoder error to propagate");
+  assert (!calls = 1);
+  print_endline
+    "✓ make_typed_tool: decoder errors short-circuit, handler sees \
+     typed input"
 
 let test_tool_handler_install_dispatches_via_chain () =
   let dispatched = ref [] in
@@ -2006,11 +2082,15 @@ let test_tool_handler_install_dispatches_via_chain () =
     Tool_handler.install ~tools:[ tool ] chain (fun () ->
         Effect.perform
           (Effects.Tool_calls
-             [ ("u1", "echo", `Assoc [ ("v", `Int 42) ]) ]))
+             [
+               ( Id.Tool_use_id.of_string "u1",
+                 "echo",
+                 `Assoc [ ("v", `Int 42) ] );
+             ]))
   in
   assert (List.length result = 1);
   let id, r = List.hd result in
-  assert (id = "u1");
+  assert (Id.Tool_use_id.to_string id = "u1");
   (match r with Ok "echoed" -> () | _ -> failwith "expected echoed");
   assert (List.length !dispatched = 1);
   print_endline
@@ -2121,5 +2201,6 @@ let () =
   test_tool_handler_retry_only_for_idempotent ();
   test_tool_handler_circuit_breaker_opens_after_threshold ();
   test_tool_handler_audit_observes_calls ();
+  test_make_typed_tool_decodes_input_and_runs_handler ();
   test_tool_handler_install_dispatches_via_chain ();
   print_endline "\nAll tests passed.\n"

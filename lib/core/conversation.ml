@@ -37,7 +37,7 @@ type state =
   | S_awaiting_user
       (** Last turn was Assistant text-only (no tool_uses); fresh User
           input or text continuation is the next valid step. *)
-  | S_has_dangling of string list
+  | S_has_dangling of Id.Tool_use_id.t list
       (** Last turn was Assistant with unanswered tool_uses. The list
           carries the [tool_use_id]s. Caller MUST close them via
           [push_user_with_results] or [close_dangling_with_ack] before
@@ -146,7 +146,7 @@ let push_user_with_results t (blocks : content_block list) : t =
   if missing <> [] then
     viol
       (Printf.sprintf "push_user_with_results: missing tool_result for: %s"
-         (String.concat ", " missing));
+         (String.concat ", " (List.map Id.Tool_use_id.to_string missing)));
   let surplus =
     List.filter (fun id -> not (List.mem id dangling_ids)) result_ids
   in
@@ -154,7 +154,7 @@ let push_user_with_results t (blocks : content_block list) : t =
     viol
       (Printf.sprintf
          "push_user_with_results: tool_result for unknown tool_use_ids: %s"
-         (String.concat ", " surplus));
+         (String.concat ", " (List.map Id.Tool_use_id.to_string surplus)));
   {
     messages = t.messages @ [ { role = User; content = blocks } ];
     state = S_awaiting_assistant;
@@ -265,7 +265,8 @@ let of_messages (msgs : message list) : (t, string) result =
                   (Printf.sprintf
                      "dangling tool_use(s) not answered in next User turn: \
                       %s"
-                     (String.concat ", " missing));
+                     (String.concat ", "
+                        (List.map Id.Tool_use_id.to_string missing)));
               let surplus =
                 List.filter (fun id -> not (List.mem id dangling)) result_ids
               in
@@ -273,7 +274,8 @@ let of_messages (msgs : message list) : (t, string) result =
                 viol
                   (Printf.sprintf
                      "tool_result(s) for unknown tool_use_id(s): %s"
-                     (String.concat ", " surplus));
+                     (String.concat ", "
+                        (List.map Id.Tool_use_id.to_string surplus)));
               walk (m :: acc) S_awaiting_assistant rest)
     in
     walk [] S_empty msgs

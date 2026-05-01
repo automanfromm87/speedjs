@@ -7,12 +7,16 @@ type role = User | Assistant
 type content_block =
   | Text of string
   | Tool_use of {
-      id : string;
+      id : Id.Tool_use_id.t;
       name : string;
+        (** Tool name remains plain [string] because dispatch routinely
+            pattern-matches against literals (e.g. ["submit_plan"]). A
+            phantom type here would force [Tool_name.of_string "literal"]
+            wrappers in every match arm — net-negative ergonomically. *)
       input : Yojson.Safe.t;
     }
   | Tool_result of {
-      tool_use_id : string;
+      tool_use_id : Id.Tool_use_id.t;
       content : string;
       is_error : bool;
     }
@@ -99,6 +103,42 @@ let make_tool_def ?(idempotent = false) ?(timeout_sec = None)
     category;
   }
 
+(** Build a [tool_def] from a TYPED handler. The decoder owns
+    JSON-to-OCaml-value translation; the handler then operates on
+    well-typed input. Output is [string] (sent back to the LLM as the
+    Tool_result content) — for structured outputs, the handler does
+    its own [to_string].
+
+    Compiles to the same untyped [tool_def] under the hood — pure
+    ergonomic win, no GADT, no existential. The ['input] type variable
+    exists only during this call site, then gets erased into
+    [Yojson.Safe.t].
+
+    Compare with [make_tool_def] which takes a raw
+    [Yojson.Safe.t -> result] handler — every tool then duplicates
+    [with_object_input]/[get_string_field] boilerplate.
+
+    Errors from [input_decoder] are wrapped in
+    ["invalid input: <reason>"] so the LLM gets actionable feedback. *)
+let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
+    ?(category = "general") ~name ~description ~input_schema
+    ~(input_decoder : Yojson.Safe.t -> ('input, string) result)
+    ~(handler : 'input -> (string, string) result) () : tool_def =
+  let wrapped (json : Yojson.Safe.t) : tool_handler_result =
+    match input_decoder json with
+    | Error e -> Error ("invalid input: " ^ e)
+    | Ok parsed -> handler parsed
+  in
+  {
+    name;
+    description;
+    input_schema;
+    handler = wrapped;
+    idempotent;
+    timeout_sec;
+    category;
+  }
+
 (** Anthropic [tool_choice] field. [Tc_auto] is API default — we omit it
     from the request body. *)
 type tool_choice =
@@ -165,7 +205,7 @@ type agent_outcome =
       final_messages : message list;
     }
   | Outcome_waiting of {
-      tool_use_id : string;
+      tool_use_id : Id.Tool_use_id.t;
       question : string;
       messages : message list;
     }
@@ -222,7 +262,7 @@ type task_run_outcome =
     }
   | Task_run_failed of { reason : agent_error; messages : message list }
   | Task_run_waiting of {
-      tool_use_id : string;
+      tool_use_id : Id.Tool_use_id.t;
       question : string;
       messages : message list;
     }
@@ -279,7 +319,7 @@ let content_block_to_json = function
       `Assoc
         [
           ("type", `String "tool_use");
-          ("id", `String id);
+          ("id", `String (Id.Tool_use_id.to_string id));
           ("name", `String name);
           ("input", input);
         ]
@@ -287,7 +327,7 @@ let content_block_to_json = function
       `Assoc
         [
           ("type", `String "tool_result");
-          ("tool_use_id", `String tool_use_id);
+          ("tool_use_id", `String (Id.Tool_use_id.to_string tool_use_id));
           ("content", `String content);
           ("is_error", `Bool is_error);
         ]
@@ -309,7 +349,7 @@ let content_block_of_json = function
       | Some (`String "tool_use") ->
           let id =
             match List.assoc_opt "id" fields with
-            | Some (`String s) -> s
+            | Some (`String s) -> Id.Tool_use_id.of_string s
             | _ -> failwith "tool_use missing id"
           in
           let name =
@@ -429,10 +469,14 @@ let content_block_pp = function
       in
       Printf.sprintf "Text(%S)" s
   | Tool_use { id; name; input } ->
-      Printf.sprintf "ToolUse(%s, %s, %s)" id name (Yojson.Safe.to_string input)
+      Printf.sprintf "ToolUse(%s, %s, %s)"
+        (Id.Tool_use_id.to_string id) name
+        (Yojson.Safe.to_string input)
   | Tool_result { tool_use_id; content; is_error } ->
       let c =
         if String.length content > 200 then String.sub content 0 200 ^ "..."
         else content
       in
-      Printf.sprintf "ToolResult(%s, %S, err=%b)" tool_use_id c is_error
+      Printf.sprintf "ToolResult(%s, %S, err=%b)"
+        (Id.Tool_use_id.to_string tool_use_id)
+        c is_error

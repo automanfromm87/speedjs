@@ -24,7 +24,7 @@ open Types
 type call_args = {
   tool : tool_def;
   input : Yojson.Safe.t;
-  use_id : string;
+  use_id : Id.Tool_use_id.t;
 }
 
 type chain_result = (string, Error.t) result
@@ -96,8 +96,8 @@ val install : tools:tool_def list -> t -> (unit -> 'a) -> 'a
 val dispatch_one :
   chain:t ->
   tools:tool_def list ->
-  string * string * Yojson.Safe.t ->
-  string * tool_handler_result
+  Id.Tool_use_id.t * string * Yojson.Safe.t ->
+  Id.Tool_use_id.t * tool_handler_result
 
 (** Apply tool-result truncation. [load_skill] is exempt — a partial
     skill body is worse than no skill at all. *)
@@ -108,10 +108,14 @@ val truncate_result : string -> tool_handler_result -> tool_handler_result
     main fiber) — used by tool installers to emit ticks before/after the
     parallel-thread dispatch boundary. *)
 val perform_tool_started_tick :
-  name:string -> use_id:string -> input:Yojson.Safe.t -> unit
+  name:string -> use_id:Id.Tool_use_id.t -> input:Yojson.Safe.t -> unit
 
 (** Perform [Governor.Tick (Tool_finished ...)] and, if [duration]
     exceeds [tool.timeout_sec], also emit [Tool_timeout]. Must run on
     the main fiber for the same reason as [perform_tool_started_tick]. *)
 val perform_tool_finished_ticks :
-  tool:tool_def -> use_id:string -> ok:bool -> duration:float -> unit
+  tool:tool_def ->
+  use_id:Id.Tool_use_id.t ->
+  ok:bool ->
+  duration:float ->
+  unit

@@ -11,7 +11,7 @@ type outcome =
       ctx : Context.t;
     }
   | Wait_for_user of {
-      tool_use_id : string;
+      tool_use_id : Id.Tool_use_id.t;
       question : string;
       ctx : Context.t;
     }
@@ -65,7 +65,9 @@ let dispatch_tool_uses (content : content_block list) : content_block list =
           let result =
             try List.assoc id results
             with Not_found ->
-              Error (Printf.sprintf "no result for use_id %s" id)
+              Error
+                (Printf.sprintf "no result for use_id %s"
+                   (Id.Tool_use_id.to_string id))
           in
           let content_str, is_error =
             match result with Ok s -> (s, false) | Error e -> (e, true)
@@ -75,7 +77,7 @@ let dispatch_tool_uses (content : content_block list) : content_block list =
         uses
 
 let find_ask_user_block (content : content_block list) :
-    (string * string) option =
+    (Id.Tool_use_id.t * string) option =
   List.find_map
     (function
       | Tool_use { id; name; input } when name = Tools.ask_user_name ->

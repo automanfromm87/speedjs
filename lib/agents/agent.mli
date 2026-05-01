@@ -26,7 +26,7 @@ val execute_tool_calls : content_block list -> content_block list
     mid-conversation and the caller (typically [run_session]) catches
     this to return [Outcome_waiting]. *)
 exception Wait_for_user of {
-  tool_use_id : string;
+  tool_use_id : Id.Tool_use_id.t;
   question : string;
   ctx_so_far : Context.t;
 }

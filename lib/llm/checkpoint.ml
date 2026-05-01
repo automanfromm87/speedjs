@@ -33,7 +33,7 @@ type tape_tool_result = Tt_ok of string | Tt_err of string
 
 type tape_entry =
   | Tape_llm of llm_response
-  | Tape_tool_batch of (string * tape_tool_result) list
+  | Tape_tool_batch of (Id.Tool_use_id.t * tape_tool_result) list
       (** [(use_id, result)] in input order. Single-tool calls use a
           1-element list. *)
 
@@ -62,7 +62,7 @@ let tape_entry_to_json = function
                  (fun (id, tr) ->
                    `Assoc
                      [
-                       ("id", `String id);
+                       ("id", `String (Id.Tool_use_id.to_string id));
                        ("result", tape_tool_result_to_json tr);
                      ])
                  results) );
@@ -81,8 +81,8 @@ let tape_entry_of_json = function
                 | `Assoc fs ->
                     let id =
                       match List.assoc_opt "id" fs with
-                      | Some (`String s) -> s
-                      | _ -> ""
+                      | Some (`String s) -> Id.Tool_use_id.of_string s
+                      | _ -> Id.Tool_use_id.of_string ""
                     in
                     let r =
                       match List.assoc_opt "result" fs with

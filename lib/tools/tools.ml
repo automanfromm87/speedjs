@@ -180,19 +180,23 @@ let calculator : tool_def =
               Result.map String.trim (read_all_from_proc cmd)));
   }
 
-(* ===== http_get: curl ===== *)
+(* ===== http_get: curl =====
+
+   Showcases [make_typed_tool]: input_decoder owns the JSON-to-record
+   translation in one place; handler operates on a strongly-typed
+   record. No more inline [with_object_input] / [get_string_field]
+   ladder buried in the handler. *)
+
+type http_get_input = { url : string }
 
 let http_get : tool_def =
-  {
-    idempotent = true;
-    timeout_sec = Some 15.0;
-    category = "network";
-    name = "http_get";
-    description =
+  make_typed_tool ~name:"http_get"
+    ~description:
       "Fetch a URL via HTTP GET and return the response body as text. \
-       Truncated to ~8000 chars. Useful for reading web pages or API endpoints.";
-    input_schema =
-      `Assoc
+       Truncated to ~8000 chars. Useful for reading web pages or API endpoints."
+    ~idempotent:true ~timeout_sec:(Some 15.0) ~category:"network"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -207,23 +211,26 @@ let http_get : tool_def =
                     ] );
               ] );
           ("required", `List [ `String "url" ]);
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* url = get_string_field "url" fields in
-            (* --compressed: ask for gzip/deflate/zstd and decompress
-               transparently. Without this many sites (python.org,
-               cloudflare-fronted, etc.) return binary garbage that breaks
-               the next LLM call (invalid UTF-8 in tool_result content). *)
-            let cmd =
-              Printf.sprintf
-                "curl -sL --compressed --max-time 15 -A 'speedjs/0.1' %s 2>&1"
-                (Filename.quote url)
-            in
-            Result.map (truncate_string ~max:8000) (read_all_from_proc cmd)));
-  }
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* url = get_string_field "url" fs in
+          Ok { url }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { url } ->
+      (* --compressed: ask for gzip/deflate/zstd and decompress transparently.
+         Without this many sites (python.org, cloudflare-fronted, etc.)
+         return binary garbage that breaks the next LLM call (invalid
+         UTF-8 in tool_result content). *)
+      let cmd =
+        Printf.sprintf
+          "curl -sL --compressed --max-time 15 -A 'speedjs/0.1' %s 2>&1"
+          (Filename.quote url)
+      in
+      Result.map (truncate_string ~max:8000) (read_all_from_proc cmd))
+    ()
 
 (* ===== current_time ===== *)
 

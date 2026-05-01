@@ -41,7 +41,7 @@ val to_messages : t -> message list
 val length : t -> int
 val is_empty : t -> bool
 val is_dangling : t -> bool
-val pending_tool_use_ids : t -> string list
+val pending_tool_use_ids : t -> Id.Tool_use_id.t list
 
 (* ===== Append (raise [Invariant_violated] on misuse) ===== *)
 

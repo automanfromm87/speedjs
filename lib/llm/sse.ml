@@ -140,5 +140,5 @@ let finalize_blocks blocks : content_block list =
                    try Yojson.Safe.from_string s
                    with Yojson.Json_error _ -> `String s)
              in
-             Some (Tool_use { id; name; input })
+             Some (Tool_use { id = Id.Tool_use_id.of_string id; name; input })
          | Build_other -> None)

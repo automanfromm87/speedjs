@@ -33,7 +33,7 @@ type outcome =
           NOT dispatched — caller decides what to do with [input]
           (e.g. [submit_task_result] parsing in plan-act). *)
   | Wait_for_user of {
-      tool_use_id : string;
+      tool_use_id : Id.Tool_use_id.t;
       question : string;
       ctx : Context.t;
     }
