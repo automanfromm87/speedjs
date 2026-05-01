@@ -132,17 +132,16 @@ let run_with_timeout ~timeout_sec ~cmd =
 
 (* ===== calculator: bc ===== *)
 
+type calculator_input = { expression : string }
+
 let calculator : tool_def =
-  {
-    idempotent = true;
-    timeout_sec = Some 5.0;
-    category = "compute";
-    name = "calculator";
-    description =
+  make_typed_tool ~name:"calculator"
+    ~description:
       "Evaluate a simple arithmetic expression. Supports +, -, *, /, parens, \
-       powers (^). Example: '(15 * 7 + 3) / 2'";
-    input_schema =
-      `Assoc
+       powers (^). Example: '(15 * 7 + 3) / 2'"
+    ~idempotent:true ~timeout_sec:(Some 5.0) ~category:"compute"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -157,28 +156,32 @@ let calculator : tool_def =
                     ] );
               ] );
           ("required", `List [ `String "expression" ]);
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* expr = get_string_field "expression" fields in
-            let safe =
-              String.for_all
-                (fun c ->
-                  match c with
-                  | '0' .. '9' | '+' | '-' | '*' | '/' | '(' | ')' | '.' | ' '
-                  | '^' | 's' | 'q' | 'r' | 't' ->
-                      true
-                  | _ -> false)
-                expr
-            in
-            if not safe then
-              Error "expression contains disallowed characters"
-            else
-              let cmd = Printf.sprintf "echo 'scale=6; %s' | bc -l 2>&1" expr in
-              Result.map String.trim (read_all_from_proc cmd)));
-  }
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* expression = get_string_field "expression" fs in
+          Ok { expression }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { expression } ->
+      let safe =
+        String.for_all
+          (fun c ->
+            match c with
+            | '0' .. '9' | '+' | '-' | '*' | '/' | '(' | ')' | '.' | ' '
+            | '^' | 's' | 'q' | 'r' | 't' ->
+                true
+            | _ -> false)
+          expression
+      in
+      if not safe then Error "expression contains disallowed characters"
+      else
+        let cmd =
+          Printf.sprintf "echo 'scale=6; %s' | bc -l 2>&1" expression
+        in
+        Result.map String.trim (read_all_from_proc cmd))
+    ()
 
 (* ===== http_get: curl =====
 
@@ -235,26 +238,22 @@ let http_get : tool_def =
 (* ===== current_time ===== *)
 
 let current_time : tool_def =
-  {
-    idempotent = true;
-    timeout_sec = Some 1.0;
-    category = "compute";
-    name = "current_time";
-    description =
-      "Get the current date and time in ISO 8601 format (local time).";
-    input_schema =
-      `Assoc
-        [ ("type", `String "object"); ("properties", `Assoc []) ];
-    handler =
-      (fun _ ->
-        let t = Unix.gettimeofday () in
-        let tm = Unix.localtime t in
-        Ok
-          (Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d"
-             (tm.Unix.tm_year + 1900)
-             (tm.Unix.tm_mon + 1) tm.Unix.tm_mday tm.Unix.tm_hour
-             tm.Unix.tm_min tm.Unix.tm_sec));
-  }
+  make_typed_tool ~name:"current_time"
+    ~description:
+      "Get the current date and time in ISO 8601 format (local time)."
+    ~idempotent:true ~timeout_sec:(Some 1.0) ~category:"compute"
+    ~input_schema:
+      (`Assoc [ ("type", `String "object"); ("properties", `Assoc []) ])
+    ~input_decoder:(fun _ -> Ok ())
+    ~handler:(fun () ->
+      let t = Unix.gettimeofday () in
+      let tm = Unix.localtime t in
+      Ok
+        (Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d"
+           (tm.Unix.tm_year + 1900)
+           (tm.Unix.tm_mon + 1) tm.Unix.tm_mday tm.Unix.tm_hour
+           tm.Unix.tm_min tm.Unix.tm_sec))
+    ()
 
 (* ===== bash: shell command execution ===== *)
 
@@ -264,23 +263,22 @@ let current_time : tool_def =
     the command, so [find .] / relative paths in [command] are anchored
     there — not in whichever directory the parent process started in.
     Modeled on helix's [shell_exec] which has the same required field. *)
+type bash_input = { command : string; exec_dir : string }
+
 let bash : tool_def =
-  {
-    (* Not idempotent: shell commands often have side effects (mkdir, npm
-       install, file writes). Conservative default. *)
-    idempotent = false;
-    timeout_sec = Some 30.0;
-    category = "exec";
-    name = "bash";
-    description =
+  make_typed_tool ~name:"bash"
+    ~description:
       "Execute a shell command and return its combined stdout+stderr. \
        30s timeout. Output truncated to ~8000 chars. \
        REQUIRES exec_dir (absolute path) — the command runs in that \
        directory. Use exec_dir=/tmp or similar for one-off commands; for \
        project work pass the project's absolute path so relative paths \
-       in your command resolve there.";
-    input_schema =
-      `Assoc
+       in your command resolve there."
+    (* Not idempotent: shell commands often have side effects (mkdir,
+       npm install, file writes). Conservative default. *)
+    ~idempotent:false ~timeout_sec:(Some 30.0) ~category:"exec"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -304,41 +302,43 @@ let bash : tool_def =
                     ] );
               ] );
           ("required", `List [ `String "command"; `String "exec_dir" ]);
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* cmd = get_string_field "command" fields in
-            let* exec_dir = get_string_field "exec_dir" fields in
-            let* exec_dir = require_absolute_path ~field:"exec_dir" exec_dir in
-            if not (Sys.file_exists exec_dir) then
-              Error (Printf.sprintf "exec_dir does not exist: %s" exec_dir)
-            else if not (Sys.is_directory exec_dir) then
-              Error (Printf.sprintf "exec_dir is not a directory: %s" exec_dir)
-            else
-              (* [cd "$dir" && (...)] rather than [chdir] so subshells
-                 invoked by the user command inherit the dir too. *)
-              let wrapped =
-                Printf.sprintf "cd %s && (%s)" (Filename.quote exec_dir) cmd
-              in
-              run_with_timeout ~timeout_sec:30 ~cmd:wrapped));
-  }
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* command = get_string_field "command" fs in
+          let* exec_dir = get_string_field "exec_dir" fs in
+          let* exec_dir = require_absolute_path ~field:"exec_dir" exec_dir in
+          Ok { command; exec_dir }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { command; exec_dir } ->
+      if not (Sys.file_exists exec_dir) then
+        Error (Printf.sprintf "exec_dir does not exist: %s" exec_dir)
+      else if not (Sys.is_directory exec_dir) then
+        Error (Printf.sprintf "exec_dir is not a directory: %s" exec_dir)
+      else
+        (* [cd "$dir" && (...)] rather than [chdir] so subshells invoked
+           by the user command inherit the dir too. *)
+        let wrapped =
+          Printf.sprintf "cd %s && (%s)" (Filename.quote exec_dir) command
+        in
+        run_with_timeout ~timeout_sec:30 ~cmd:wrapped)
+    ()
 
 (* ===== view_file ===== *)
 
+type view_file_input = { path : string; view_range : (int * int) option }
+
 let view_file : tool_def =
-  {
-    idempotent = true;
-    timeout_sec = Some 5.0;
-    category = "file_io";
-    name = "view_file";
-    description =
+  make_typed_tool ~name:"view_file"
+    ~description:
       "Read a file and return its contents (with line numbers). Optional \
        view_range [start, end] (1-indexed, inclusive). For directories, \
-       lists entries instead. PATH MUST BE ABSOLUTE (starts with /).";
-    input_schema =
-      `Assoc
+       lists entries instead. PATH MUST BE ABSOLUTE (starts with /)."
+    ~idempotent:true ~timeout_sec:(Some 5.0) ~category:"file_io"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -348,87 +348,96 @@ let view_file : tool_def =
                   `Assoc
                     [
                       ("type", `String "string");
-                      ("description", `String "Absolute file or directory path");
+                      ( "description",
+                        `String "Absolute file or directory path" );
                     ] );
                 ( "view_range",
                   `Assoc
                     [
                       ("type", `String "array");
                       ( "description",
-                        `String "Optional [start, end] line numbers, 1-indexed"
+                        `String
+                          "Optional [start, end] line numbers, 1-indexed"
                       );
                       ("items", `Assoc [ ("type", `String "integer") ]);
                     ] );
               ] );
           ("required", `List [ `String "path" ]);
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* path = get_string_field "path" fields in
-            let* path = require_absolute_path ~field:"path" path in
-            if not (Sys.file_exists path) then
-              Error (Printf.sprintf "path not found: %s" path)
-            else if Sys.is_directory path then
-              try
-                let entries = Sys.readdir path |> Array.to_list in
-                let entries = List.sort compare entries in
-                Ok
-                  (Printf.sprintf "Directory: %s\n%s" path
-                     (String.concat "\n"
-                        (List.map (fun e -> "  " ^ e) entries)))
-              with e ->
-                Error (Printf.sprintf "readdir failed: %s" (Printexc.to_string e))
-            else
-              try
-                let ic = open_in path in
-                let lines = ref [] in
-                (try
-                   while true do
-                     lines := input_line ic :: !lines
-                   done
-                 with End_of_file -> ());
-                close_in ic;
-                let lines = List.rev !lines in
-                let total = List.length lines in
-                let start_line, end_line =
-                  match List.assoc_opt "view_range" fields with
-                  | Some (`List [ `Int s; `Int e ]) -> (s, e)
-                  | _ -> (1, total)
-                in
-                let start_line = max 1 start_line in
-                let end_line = min total end_line in
-                let numbered =
-                  List.mapi
-                    (fun i ln ->
-                      let n = i + 1 in
-                      if n >= start_line && n <= end_line then
-                        Some (Printf.sprintf "%5d\t%s" n ln)
-                      else None)
-                    lines
-                  |> List.filter_map (fun x -> x)
-                in
-                let body = String.concat "\n" numbered in
-                Ok (truncate_string ~max:8000 body)
-              with e ->
-                Error (Printf.sprintf "read failed: %s" (Printexc.to_string e))));
-  }
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* path = get_string_field "path" fs in
+          let* path = require_absolute_path ~field:"path" path in
+          let view_range =
+            match List.assoc_opt "view_range" fs with
+            | Some (`List [ `Int s; `Int e ]) -> Some (s, e)
+            | _ -> None
+          in
+          Ok { path; view_range }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { path; view_range } ->
+      if not (Sys.file_exists path) then
+        Error (Printf.sprintf "path not found: %s" path)
+      else if Sys.is_directory path then
+        try
+          let entries = Sys.readdir path |> Array.to_list in
+          let entries = List.sort compare entries in
+          Ok
+            (Printf.sprintf "Directory: %s\n%s" path
+               (String.concat "\n" (List.map (fun e -> "  " ^ e) entries)))
+        with e ->
+          Error
+            (Printf.sprintf "readdir failed: %s" (Printexc.to_string e))
+      else
+        try
+          let ic = open_in path in
+          let lines = ref [] in
+          (try
+             while true do
+               lines := input_line ic :: !lines
+             done
+           with End_of_file -> ());
+          close_in ic;
+          let lines = List.rev !lines in
+          let total = List.length lines in
+          let start_line, end_line =
+            match view_range with
+            | Some (s, e) -> (s, e)
+            | None -> (1, total)
+          in
+          let start_line = max 1 start_line in
+          let end_line = min total end_line in
+          let numbered =
+            List.mapi
+              (fun i ln ->
+                let n = i + 1 in
+                if n >= start_line && n <= end_line then
+                  Some (Printf.sprintf "%5d\t%s" n ln)
+                else None)
+              lines
+            |> List.filter_map (fun x -> x)
+          in
+          let body = String.concat "\n" numbered in
+          Ok (truncate_string ~max:8000 body)
+        with e ->
+          Error (Printf.sprintf "read failed: %s" (Printexc.to_string e)))
+    ()
 
 (* ===== write_file ===== *)
 
+type write_file_input = { path : string; content : string }
+
 let write_file : tool_def =
-  {
-    (* Not idempotent: overwrites file content. *)
-    idempotent = false;
-    timeout_sec = Some 10.0;
-    category = "file_io";
-    name = "write_file";
-    description =
+  make_typed_tool ~name:"write_file"
+    ~description:
       "Create or overwrite a file with the given content. Returns success \
-       message with byte count. PATH MUST BE ABSOLUTE (starts with /).";
-    input_schema =
-      `Assoc
+       message with byte count. PATH MUST BE ABSOLUTE (starts with /)."
+    (* Not idempotent: overwrites file content. *)
+    ~idempotent:false ~timeout_sec:(Some 10.0) ~category:"file_io"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -448,43 +457,48 @@ let write_file : tool_def =
                     ] );
               ] );
           ("required", `List [ `String "path"; `String "content" ]);
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* path = get_string_field "path" fields in
-            let* path = require_absolute_path ~field:"path" path in
-            let* content = get_string_field "content" fields in
-            try
-              (* Auto-create the parent dir; saves the LLM 2 iterations
-                 every time it writes to a fresh subdir. *)
-              ensure_dir (Filename.dirname path);
-              let oc = open_out path in
-              output_string oc content;
-              close_out oc;
-              Ok
-                (Printf.sprintf "wrote %d bytes to %s" (String.length content)
-                   path)
-            with e ->
-              Error (Printf.sprintf "write failed: %s" (Printexc.to_string e))));
-  }
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* path = get_string_field "path" fs in
+          let* path = require_absolute_path ~field:"path" path in
+          let* content = get_string_field "content" fs in
+          Ok { path; content }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { path; content } ->
+      try
+        (* Auto-create the parent dir; saves the LLM 2 iterations every
+           time it writes to a fresh subdir. *)
+        ensure_dir (Filename.dirname path);
+        let oc = open_out path in
+        output_string oc content;
+        close_out oc;
+        Ok
+          (Printf.sprintf "wrote %d bytes to %s" (String.length content) path)
+      with e ->
+        Error (Printf.sprintf "write failed: %s" (Printexc.to_string e)))
+    ()
 
 (* ===== str_replace: edit a file by exact string substitution ===== *)
 
+type str_replace_input = {
+  path : string;
+  old_str : string;
+  new_str : string;
+}
+
 let str_replace : tool_def =
-  {
-    (* Not idempotent: mutates file. *)
-    idempotent = false;
-    timeout_sec = Some 10.0;
-    category = "file_io";
-    name = "str_replace";
-    description =
+  make_typed_tool ~name:"str_replace"
+    ~description:
       "Edit a file by replacing an exact string with a new one. The old_str \
        must match exactly once in the file (whitespace-sensitive). \
-       PATH MUST BE ABSOLUTE (starts with /).";
-    input_schema =
-      `Assoc
+       PATH MUST BE ABSOLUTE (starts with /)."
+    (* Not idempotent: mutates file. *)
+    ~idempotent:false ~timeout_sec:(Some 10.0) ~category:"file_io"
+    ~input_schema:
+      (`Assoc
         [
           ("type", `String "object");
           ( "properties",
@@ -501,7 +515,8 @@ let str_replace : tool_def =
                     [
                       ("type", `String "string");
                       ( "description",
-                        `String "Exact string to replace (must occur once)" );
+                        `String "Exact string to replace (must occur once)"
+                      );
                     ] );
                 ( "new_str",
                   `Assoc
@@ -511,61 +526,67 @@ let str_replace : tool_def =
                     ] );
               ] );
           ( "required",
-            `List [ `String "path"; `String "old_str"; `String "new_str" ] );
-        ];
-    handler =
-      (fun input ->
-        with_object_input input (fun fields ->
-            let ( let* ) = Result.bind in
-            let* path = get_string_field "path" fields in
-            let* path = require_absolute_path ~field:"path" path in
-            let* old_str = get_string_field "old_str" fields in
-            let* new_str = get_string_field "new_str" fields in
-            try
-              let ic = open_in path in
-              let n = in_channel_length ic in
-              let content = really_input_string ic n in
-              close_in ic;
-              (* Find all occurrences using naive substring search. *)
-              let find_all needle hay =
-                let n = String.length needle in
-                let h = String.length hay in
-                if n = 0 then []
-                else
-                  let rec loop i acc =
-                    if i + n > h then List.rev acc
-                    else if String.sub hay i n = needle then
-                      loop (i + n) (i :: acc)
-                    else loop (i + 1) acc
-                  in
-                  loop 0 []
-              in
-              let occurrences = find_all old_str content in
-              (match occurrences with
-              | [] -> Error (Printf.sprintf "old_str not found in %s" path)
-              | _ :: _ :: _ ->
-                  Error
-                    (Printf.sprintf
-                       "old_str matches %d times in %s — must be unique"
-                       (List.length occurrences) path)
-              | [ idx ] ->
-                  let before = String.sub content 0 idx in
-                  let after_start = idx + String.length old_str in
-                  let after =
-                    String.sub content after_start (String.length content - after_start)
-                  in
-                  let new_content = before ^ new_str ^ after in
-                  let oc = open_out path in
-                  output_string oc new_content;
-                  close_out oc;
-                  Ok
-                    (Printf.sprintf
-                       "replaced 1 occurrence in %s (%d → %d bytes)" path n
-                       (String.length new_content)))
-            with e ->
-              Error
-                (Printf.sprintf "str_replace failed: %s" (Printexc.to_string e))));
-  }
+            `List [ `String "path"; `String "old_str"; `String "new_str" ]
+          );
+        ])
+    ~input_decoder:(fun json ->
+      let ( let* ) = Result.bind in
+      match json with
+      | `Assoc fs ->
+          let* path = get_string_field "path" fs in
+          let* path = require_absolute_path ~field:"path" path in
+          let* old_str = get_string_field "old_str" fs in
+          let* new_str = get_string_field "new_str" fs in
+          Ok { path; old_str; new_str }
+      | _ -> Error "input must be a JSON object")
+    ~handler:(fun { path; old_str; new_str } ->
+      try
+        let ic = open_in path in
+        let n = in_channel_length ic in
+        let content = really_input_string ic n in
+        close_in ic;
+        (* Find all occurrences using naive substring search. *)
+        let find_all needle hay =
+          let n = String.length needle in
+          let h = String.length hay in
+          if n = 0 then []
+          else
+            let rec loop i acc =
+              if i + n > h then List.rev acc
+              else if String.sub hay i n = needle then
+                loop (i + n) (i :: acc)
+              else loop (i + 1) acc
+            in
+            loop 0 []
+        in
+        let occurrences = find_all old_str content in
+        match occurrences with
+        | [] -> Error (Printf.sprintf "old_str not found in %s" path)
+        | _ :: _ :: _ ->
+            Error
+              (Printf.sprintf
+                 "old_str matches %d times in %s — must be unique"
+                 (List.length occurrences) path)
+        | [ idx ] ->
+            let before = String.sub content 0 idx in
+            let after_start = idx + String.length old_str in
+            let after =
+              String.sub content after_start
+                (String.length content - after_start)
+            in
+            let new_content = before ^ new_str ^ after in
+            let oc = open_out path in
+            output_string oc new_content;
+            close_out oc;
+            Ok
+              (Printf.sprintf
+                 "replaced 1 occurrence in %s (%d → %d bytes)" path n
+                 (String.length new_content))
+      with e ->
+        Error
+          (Printf.sprintf "str_replace failed: %s"
+             (Printexc.to_string e)))
+    ()
 
 (* ===== ask_user: pause-tool =====
 

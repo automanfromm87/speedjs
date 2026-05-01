@@ -13,15 +13,6 @@ val default_max_iterations : int
 
 val default_system_prompt : string
 
-(** Concatenate all [Text] blocks (separated by newlines), drop tool_use
-    and tool_result blocks. *)
-val extract_final_text : content_block list -> string
-
-(** Dispatch all [Tool_use] blocks in [content] via the [Tool_calls]
-    effect, returning matching [Tool_result] blocks in original order.
-    Reusable by other agents (e.g. [Planner]) that drive their own loop. *)
-val execute_tool_calls : content_block list -> content_block list
-
 (** Raised when the model calls [ask_user]. The agent loop halts
     mid-conversation and the caller (typically [run_session]) catches
     this to return [Outcome_waiting]. *)
@@ -71,7 +62,7 @@ val run :
   agent_result
 
 (** Multi-turn entry point: takes seed [messages] and returns an
-    [agent_outcome] carrying the updated history (including any pending
+    [session_result] carrying the updated history (including any pending
     ask_user tool_use). [system_prompt] / [system_blocks] same as
     [run]. *)
 val run_session :
@@ -81,4 +72,4 @@ val run_session :
   messages:message list ->
   tools:tool_def list ->
   unit ->
-  agent_outcome
+  session_result

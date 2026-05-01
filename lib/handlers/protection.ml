@@ -36,8 +36,8 @@ let catch_protection_errors (f : unit -> Types.agent_result) :
       Error (Types.Llm_call_failed (Llm_error.pp err))
 
 (** Outcome-flavored variant for session mode. *)
-let catch_protection_errors_outcome (f : unit -> Types.agent_outcome) :
-    Types.agent_outcome =
+let catch_protection_errors_outcome (f : unit -> Types.session_result) :
+    Types.session_result =
   try f () with
   | Governor.Governor_aborted { limit; reason } ->
       Outcome_failed

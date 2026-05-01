@@ -166,18 +166,12 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
     let base =
       Context.empty
       |> Context.with_tools tools_with_submit
-      |> Context.with_system_prompt system_prompt
+      |> Context.apply_system ~system_prompt ~system_blocks
       |> Context.with_conversation conv
-    in
-    let with_blocks =
-      List.fold_left
-        (fun c (name, body) ->
-          if body = "" then c else Context.add_system_block ~name ~body c)
-        base system_blocks
     in
     List.fold_left
       (fun c (tag, body) -> Context.with_env ~tag ~body c)
-      with_blocks env
+      base env
   in
   let final_messages c =
     Conversation.to_messages (Context.conversation c)
@@ -244,7 +238,7 @@ let summarize ~plan ~results () : agent_result =
     }
   in
   let response = Effect.perform (Effects.Llm_complete args) in
-  Ok (Agent.extract_final_text response.content)
+  Ok (Step.extract_final_text response.content)
 
 let executor_memory_name = "executor"
 

@@ -2,7 +2,7 @@
 
 open Types
 
-type outcome =
+type result =
   | Continue of Context.t
   | Terminal_text of { answer : string; ctx : Context.t }
   | Terminal_tool of {
@@ -94,7 +94,7 @@ let find_ask_user_block (content : content_block list) :
     content
 
 let once ?(strategy = Context.Strategy.flat) ?(tool_choice = Tc_auto)
-    ?(terminal_tools : string list = []) ~(ctx : Context.t) () : outcome =
+    ?(terminal_tools : string list = []) ~(ctx : Context.t) () : result =
   let args = Context.to_llm_args ~strategy ~tool_choice ctx in
   let response = Effect.perform (Effects.Llm_complete args) in
   Effect.perform

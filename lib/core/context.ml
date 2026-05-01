@@ -179,6 +179,21 @@ let add_system_block ~name ~body t =
   { t with system_blocks = { name; body } :: t.system_blocks }
 let with_conversation c t = { t with conversation = c }
 
+(** Convenience: set the base system prompt and append all
+    [(name, body)] pairs as system blocks. Skips entries whose body is
+    empty so callers can pass [(name, "")] without polluting the
+    rendered prompt. *)
+let apply_system ?system_prompt ?(system_blocks = []) t =
+  let t =
+    match system_prompt with
+    | Some s -> with_system_prompt s t
+    | None -> t
+  in
+  List.fold_left
+    (fun c (name, body) ->
+      if body = "" then c else add_system_block ~name ~body c)
+    t system_blocks
+
 (* ===== Inspection ===== *)
 
 let conversation t = t.conversation

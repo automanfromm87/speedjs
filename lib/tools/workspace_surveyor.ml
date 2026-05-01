@@ -180,7 +180,7 @@ let summarize ~working_dir ~raw : string =
     }
   in
   let response = Effect.perform (Effects.Llm_complete args) in
-  String.trim (Agent.extract_final_text response.content)
+  String.trim (Step.extract_final_text response.content)
 
 (** Top-level: scan [working_dir] and return a markdown workspace brief.
     Empty string when the directory doesn't exist, is empty, or any step

@@ -81,127 +81,47 @@ let build_system_blocks ~skill_index =
   if skill_index = "" then []
   else [ ("available_skills", skill_index) ]
 
-(** Build the LLM handler chain from CLI args.
-
-    Reads top-to-bottom as bottom-to-top of the call stack — the chain
-    is built via [|>] so the leftmost (anthropic) is the leaf and each
-    subsequent middleware wraps it. The on-the-wire order at runtime is
-    the REVERSE: logging → retry → cost-tracking → validation → API
-    call. (i.e. logging sees the OUTSIDE; anthropic does the actual call.) *)
-let build_llm_chain ~(args : Args.t) ~model ~cost ~on_log ~on_text_delta
-    : Speedjs.Llm_handler.t =
-  let on_retry n err delay =
-    Log.f "[retry] attempt %d failed (%s); sleeping %.1fs" (n + 1)
-      (Speedjs.Llm_error.kind err) delay
-  in
-  let policy =
-    if args.max_retries > 0 then
-      {
-        Speedjs.Llm_handler.Retry_policy.default with
-        max_attempts = args.max_retries;
-      }
-    else Speedjs.Llm_handler.Retry_policy.none
-  in
-  Speedjs.Llm_handler.anthropic ~model ~on_text_delta ()
-  |> Speedjs.Llm_handler.with_validation
-  |> Speedjs.Llm_handler.with_cost_tracking ~cost
-  |> Speedjs.Llm_handler.with_retry ~policy ~on_retry
-  |> Speedjs.Llm_handler.with_governor_ticks
-  |> Speedjs.Llm_handler.with_logging ~on_log
-
-(** Build the Tool dispatch chain.
-
-    Same shape as the LLM chain: each middleware wraps the next. Note
-    that [with_retry] only fires on tools whose [idempotent = true]
-    metadata is set; non-idempotent tools (bash, write_file) are never
-    retried even on transient failures.
-
-    Tick emission lives in [Tool_handler.install] (not in this chain) so
-    that parallel batches dispatched via threads don't try to perform
-    effects on workers — handlers don't propagate across threads. *)
-let build_tool_chain ~on_log : Speedjs.Tool_handler.t =
-  Speedjs.Tool_handler.direct
-  |> Speedjs.Tool_handler.with_timeout ~default_sec:60.0
-  |> Speedjs.Tool_handler.with_validation
-  |> Speedjs.Tool_handler.with_retry
-       ~policy:Speedjs.Llm_handler.Retry_policy.default
-  |> Speedjs.Tool_handler.with_circuit_breaker ~failure_threshold:5
-       ~cooldown:60.0
-  |> Speedjs.Tool_handler.with_logging ~on_log
-
-(** Build the Log handler chain. *)
-let build_log_chain ~on_log : Speedjs.Log_handler.t =
-  Speedjs.Log_handler.to_function on_log
-
-(** Build [Governor.Limits] from CLI args.
-
-    Existing CLI flags map onto governor caps:
-    - [--walltime] → [max_wall_time_sec]
-    - [--budget]   → [max_cost_usd]
-    Other caps use governor defaults; we may add CLI flags later. *)
-let build_governor_limits ~(args : Args.t) : Speedjs.Governor.Limits.t =
+(** Map CLI [Args.t] to [Runtime.config] — the only CLI-specific bridge
+    left in setup.ml. All actual chain composition lives in
+    [Speedjs.Runtime] so library callers reuse the same wiring. *)
+let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
+    ~on_text_delta : Speedjs.Runtime.config =
   let base = Speedjs.Governor.Limits.default in
-  let pick_some override default = match override with Some _ -> override | None -> default in
+  let pick_some override default =
+    match override with Some _ -> override | None -> default
+  in
+  let governor_limits : Speedjs.Governor.Limits.t =
+    {
+      max_wall_time_sec =
+        (if args.walltime > 0.0 then Some args.walltime
+         else base.max_wall_time_sec);
+      max_cost_usd = pick_some args.budget base.max_cost_usd;
+      max_steps = pick_some args.max_steps base.max_steps;
+      max_tool_calls = pick_some args.max_tool_calls base.max_tool_calls;
+      max_subagent_depth =
+        pick_some args.max_subagent_depth base.max_subagent_depth;
+      max_repeated_tool_calls =
+        pick_some args.max_repeated_tool_calls base.max_repeated_tool_calls;
+    }
+  in
   {
-    Speedjs.Governor.Limits.max_wall_time_sec =
-      (if args.walltime > 0.0 then Some args.walltime
-       else base.max_wall_time_sec);
-    max_cost_usd = pick_some args.budget base.max_cost_usd;
-    max_steps = pick_some args.max_steps base.max_steps;
-    max_tool_calls = pick_some args.max_tool_calls base.max_tool_calls;
-    max_subagent_depth =
-      pick_some args.max_subagent_depth base.max_subagent_depth;
-    max_repeated_tool_calls =
-      pick_some args.max_repeated_tool_calls base.max_repeated_tool_calls;
+    model;
+    cost;
+    on_log;
+    on_text_delta;
+    governor_limits;
+    llm_max_retries = args.max_retries;
+    tape_path = args.tape;
+    crash_after = args.crash_after;
+    emit_governor_events_to_log = Sys.getenv_opt "SPEEDJS_QUIET" = None;
   }
 
-(** Compose the runtime as a stack of effect handlers:
-
-    OUTERMOST       Governor (global limits + death-loop detection)
-                    Log_handler
-                    Tool_handler / Llm_handler chain installs
-                    + Checkpoint tape (when --tape)
-    INNERMOST       agent thunk
-
-    The Governor sees [Tick] events emitted by the LLM and Tool chains'
-    [with_governor_ticks] middleware, plus [Subagent_entered/Exited]
-    from [Sub_agent.delegate]. *)
+(** Compose runtime + run thunk. Thin wrapper around
+    [Speedjs.Runtime.install]. *)
 let make_runtime (args : Args.t) ~tools ~model ~cost ~on_log ~on_text_delta
     : (unit -> 'a) -> 'a =
  fun thunk ->
-  let llm_chain =
-    build_llm_chain ~args ~model ~cost ~on_log ~on_text_delta
+  let config =
+    runtime_config_of_args args ~model ~cost ~on_log ~on_text_delta
   in
-  let tool_chain = build_tool_chain ~on_log in
-  let limits = build_governor_limits ~args in
-  let governed thunk =
-    Speedjs.Governor.install ~limits ~cost
-      ~on_tick:(fun ev ->
-        if not (Sys.getenv_opt "SPEEDJS_QUIET" <> None) then
-          on_log
-            (Printf.sprintf "[gov] %s"
-               (Speedjs.Governor.Event.to_string ev)))
-      thunk
-  in
-  match args.tape with
-  | None ->
-      governed (fun () ->
-          Speedjs.Llm_handler.install llm_chain (fun () ->
-              Speedjs.Tool_handler.install ~tools tool_chain (fun () ->
-                  Speedjs.Log_handler.install (build_log_chain ~on_log)
-                    thunk)))
-  | Some path ->
-      let session =
-        Speedjs.Checkpoint.open_session ~path ~on_log
-          ?crash_after_live_llm:args.crash_after ()
-      in
-      at_exit (fun () -> Speedjs.Checkpoint.close_session session);
-      let llm_with_tape =
-        llm_chain |> Speedjs.Checkpoint.with_tape_llm session
-      in
-      governed (fun () ->
-          Speedjs.Llm_handler.install llm_with_tape (fun () ->
-              Speedjs.Checkpoint.install_tools_with_tape session ~tools
-                tool_chain (fun () ->
-                  Speedjs.Log_handler.install (build_log_chain ~on_log)
-                    thunk)))
+  Speedjs.Runtime.install ~tools ~config thunk

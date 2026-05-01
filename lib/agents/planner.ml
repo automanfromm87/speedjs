@@ -229,7 +229,7 @@ let plan ?(system_prompt = default_system_prompt)
               let assistant =
                 { role = Assistant; content = response.content }
               in
-              let tool_results = Agent.execute_tool_calls response.content in
+              let tool_results = Step.dispatch_tool_uses response.content in
               let user_turn = { role = User; content = tool_results } in
               loop (messages @ [ assistant; user_turn ]) (iter + 1))
       | Max_tokens ->
@@ -497,7 +497,7 @@ let recover ?(max_iterations = default_planner_max_iter)
               let assistant =
                 { role = Assistant; content = response.content }
               in
-              let tool_results = Agent.execute_tool_calls response.content in
+              let tool_results = Step.dispatch_tool_uses response.content in
               let user_turn = { role = User; content = tool_results } in
               loop (messages @ [ assistant; user_turn ]) (iter + 1))
       | Max_tokens | Stop_sequence | Other _ ->

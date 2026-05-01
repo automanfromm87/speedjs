@@ -30,7 +30,7 @@ let handle_event ~blocks ~stop_reason ~(usage : usage ref) ~on_text_delta
           | Some (`Assoc m) -> (
               match List.assoc_opt "usage" m with
               | Some j ->
-                  let u : usage = usage_of_json j in
+                  let u : usage = Codec.usage_of_json j in
                   usage :=
                     {
                       !usage with
@@ -107,7 +107,7 @@ let handle_event ~blocks ~stop_reason ~(usage : usage ref) ~on_text_delta
           (match List.assoc_opt "delta" fields with
           | Some (`Assoc d) -> (
               match List.assoc_opt "stop_reason" d with
-              | Some (`String s) -> stop_reason := stop_reason_of_string s
+              | Some (`String s) -> stop_reason := Codec.stop_reason_of_string s
               | _ -> ())
           | _ -> ());
           match List.assoc_opt "usage" fields with

@@ -45,6 +45,16 @@ val with_env : tag:string -> body:string -> t -> t
     preserves prompt-cache stability when extensions don't change. *)
 val add_system_block : name:string -> body:string -> t -> t
 
+(** Convenience for entry points: set the base [system_prompt] and
+    append [(name, body)] pairs as [system_blocks] (skipping empty
+    bodies). Replaces the inline fold-loop that was duplicated in
+    [Agent.run] / [Plan_act.run_for_task]. *)
+val apply_system :
+  ?system_prompt:string ->
+  ?system_blocks:(string * string) list ->
+  t ->
+  t
+
 val with_conversation : Conversation.t -> t -> t
 
 (* ===== Inspection ===== *)

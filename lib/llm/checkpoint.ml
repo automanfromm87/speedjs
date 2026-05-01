@@ -51,7 +51,7 @@ let tape_tool_result_of_json = function
 
 let tape_entry_to_json = function
   | Tape_llm r ->
-      `Assoc [ ("kind", `String "llm"); ("data", llm_response_to_json r) ]
+      `Assoc [ ("kind", `String "llm"); ("data", Codec.llm_response_to_json r) ]
   | Tape_tool_batch results ->
       `Assoc
         [
@@ -73,7 +73,7 @@ let tape_entry_of_json = function
       let kind = List.assoc_opt "kind" fields in
       let data = List.assoc_opt "data" fields in
       match (kind, data) with
-      | Some (`String "llm"), Some j -> Tape_llm (llm_response_of_json j)
+      | Some (`String "llm"), Some j -> Tape_llm (Codec.llm_response_of_json j)
       | Some (`String "tool_batch"), Some (`List items) ->
           let parsed =
             List.map

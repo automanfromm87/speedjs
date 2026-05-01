@@ -92,7 +92,7 @@ let with_logging ?(on_log = prerr_endline) (inner : t) : t =
   | response ->
       on_log
         (Printf.sprintf "[llm] ← stop=%s, %d in / %d out tokens"
-           (stop_reason_to_string response.stop_reason)
+           (Codec.stop_reason_to_string response.stop_reason)
            response.usage.input_tokens response.usage.output_tokens);
       response
   | exception (Llm_error.Llm_api_error err as e) ->

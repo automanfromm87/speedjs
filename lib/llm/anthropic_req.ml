@@ -90,14 +90,14 @@ let cacheable_tools tools =
   | [] -> []
   | last :: rest_rev ->
       let with_cache =
-        match tool_def_to_json last with
+        match Codec.tool_def_to_json last with
         | `Assoc fields ->
             `Assoc
               (fields
               @ [ ("cache_control", `Assoc [ ("type", `String "ephemeral") ]) ])
         | other -> other
       in
-      List.rev_map tool_def_to_json rest_rev |> List.rev |> fun rest ->
+      List.rev_map Codec.tool_def_to_json rest_rev |> List.rev |> fun rest ->
       rest @ [ with_cache ]
 
 (** Server-side context management: prune stale tool_uses when input
@@ -138,7 +138,7 @@ let context_management_block =
 let build_request_body ~model ~system ~messages ~tools ~tool_choice
     ~max_tokens ~stream =
   let messages_json =
-    List.map message_to_json messages |> mark_last_message_cacheable
+    List.map Codec.message_to_json messages |> mark_last_message_cacheable
   in
   let base =
     [
@@ -165,7 +165,7 @@ let build_request_body ~model ~system ~messages ~tools ~tool_choice
   let with_tool_choice =
     match tool_choice with
     | Tc_auto -> with_tools (* API default; omit to keep body small *)
-    | tc -> with_tools @ [ ("tool_choice", tool_choice_to_json tc) ]
+    | tc -> with_tools @ [ ("tool_choice", Codec.tool_choice_to_json tc) ]
   in
   let with_stream =
     if stream then with_tool_choice @ [ ("stream", `Bool true) ]
@@ -178,18 +178,18 @@ let parse_response (json : Yojson.Safe.t) : llm_response =
   | `Assoc fields ->
       let content =
         match List.assoc_opt "content" fields with
-        | Some (`List items) -> List.map content_block_of_json items
+        | Some (`List items) -> List.map Codec.content_block_of_json items
         | _ -> failwith "response missing content"
       in
       let stop_reason =
         match List.assoc_opt "stop_reason" fields with
-        | Some (`String s) -> stop_reason_of_string s
+        | Some (`String s) -> Codec.stop_reason_of_string s
         | Some `Null -> Other "null"
         | _ -> Other "missing"
       in
       let usage =
         match List.assoc_opt "usage" fields with
-        | Some j -> usage_of_json j
+        | Some j -> Codec.usage_of_json j
         | None ->
             {
               input_tokens = 0;

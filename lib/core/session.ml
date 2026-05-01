@@ -26,7 +26,7 @@ let to_json (s : t) : Yojson.Safe.t =
   `Assoc
     [
       ("model", `String s.model);
-      ("messages", `List (List.map message_to_json s.messages));
+      ("messages", `List (List.map Codec.message_to_json s.messages));
       ( "pending_tool_use_id",
         match s.pending_tool_use_id with
         | Some id -> `String (Id.Tool_use_id.to_string id)
@@ -66,8 +66,8 @@ let message_of_json = function
                           | _ -> false
                         in
                         Tool_result { tool_use_id; content; is_error }
-                    | _ -> content_block_of_json j)
-                | _ -> content_block_of_json j)
+                    | _ -> Codec.content_block_of_json j)
+                | _ -> Codec.content_block_of_json j)
               items
         | _ -> []
       in
@@ -133,7 +133,7 @@ let append_input (s : t) (input : string) : t =
 
 (** Update session state after running the agent: stash the resulting
     message history and pending state. *)
-let update_after_run (s : t) (outcome : agent_outcome) : t =
+let update_after_run (s : t) (outcome : session_result) : t =
   match outcome with
   | Outcome_done { final_messages; _ } ->
       { s with messages = final_messages; pending_tool_use_id = None }

@@ -10,12 +10,6 @@ open Types
     needs a build → fix → rebuild loop. *)
 let default_max_iterations = 100
 
-(** Re-export [Step] helpers for callers that previously imported them
-    from this module ([execute_tool_calls] etc.). *)
-let extract_final_text = Step.extract_final_text
-
-let execute_tool_calls = Step.dispatch_tool_uses
-
 (** Raised when the LLM calls the [ask_user] pause-tool. The agent loop
     halts mid-conversation; [run_session] catches this and returns
     [Outcome_waiting]. *)
@@ -93,22 +87,12 @@ let default_system_prompt =
    answer the user's question. Think step-by-step and only call tools when \
    they are needed."
 
-(** Apply [system_prompt] (default = [default_system_prompt]) and
-    each [system_blocks] entry (extension-contributed fragments) onto
-    [ctx]. Common helper for the entry points. *)
-let apply_system ?(system_prompt = default_system_prompt)
-    ?(system_blocks : (string * string) list = []) ctx =
-  let ctx = Context.with_system_prompt system_prompt ctx in
-  List.fold_left
-    (fun c (name, body) ->
-      if body = "" then c else Context.add_system_block ~name ~body c)
-    ctx system_blocks
-
 (** Build a [Context] for a single user-query / tools combination. *)
-let make_ctx ?system_prompt ?system_blocks ~user_query ~tools () =
+let make_ctx ?(system_prompt = default_system_prompt) ?system_blocks
+    ~user_query ~tools () =
   Context.empty
   |> Context.with_tools tools
-  |> apply_system ?system_prompt ?system_blocks
+  |> Context.apply_system ~system_prompt ?system_blocks
   |> Context.push_user_text user_query
 
 (** One-shot entry point. Returns just the final answer string. *)
@@ -120,10 +104,10 @@ let run ?max_iterations ?system_prompt ?system_blocks ~user_query ~tools
   | Error (e, _) -> Error e
 
 (** Multi-turn entry point. Seeds with [messages], runs the loop, and
-    returns an [agent_outcome] carrying the updated history (including
+    returns an [session_result] carrying the updated history (including
     any pending ask_user tool_use). *)
 let run_session ?max_iterations ?system_prompt ?system_blocks ~messages
-    ~tools () : agent_outcome =
+    ~tools () : session_result =
   let ctx_of_messages msgs =
     let conv =
       match Conversation.of_messages msgs with
@@ -133,7 +117,10 @@ let run_session ?max_iterations ?system_prompt ?system_blocks ~messages
     in
     Context.empty
     |> Context.with_tools tools
-    |> apply_system ?system_prompt ?system_blocks
+    |> Context.apply_system
+         ~system_prompt:
+           (Option.value system_prompt ~default:default_system_prompt)
+         ?system_blocks
     |> Context.with_conversation conv
   in
   let final_messages ctx =

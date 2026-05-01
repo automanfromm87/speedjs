@@ -18,8 +18,14 @@ open Types
 
 (** What happened in one step. The Context is always returned at its
     new state (assistant response appended, tool_results appended if
-    any), so callers can persist / inspect it. *)
-type outcome =
+    any), so callers can persist / inspect it.
+
+    Named [result] (not [outcome]) to avoid collision with
+    [Types.session_result] (multi-turn session result) and
+    [Types.task_run_outcome] (per-task result inside Plan_act) — those
+    three concepts coexist in the codebase and stayed confusable when
+    they all shared the [outcome] name. *)
+type result =
   | Continue of Context.t
       (** Tool batch dispatched; ready for another step. *)
   | Terminal_text of { answer : string; ctx : Context.t }
@@ -66,4 +72,4 @@ val once :
   ?terminal_tools:string list ->
   ctx:Context.t ->
   unit ->
-  outcome
+  result
