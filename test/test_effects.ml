@@ -6,10 +6,12 @@
     - tools that perform these effects pick up whichever is installed *)
 
 open Speedjs
+open Types
 
 let test_time_now_default_handler_returns_real_time () =
   let t1 =
-    Time_handler.install (fun () -> Effect.perform Effects.Time_now)
+    Time_handler.install Time_handler.direct (fun () ->
+        Effect.perform Effects.Time_now)
   in
   (* Sanity: must be in the recent-past / near-future range *)
   assert (t1 > 1.7e9 && t1 < 3.0e9);
@@ -104,6 +106,124 @@ let test_current_time_tool_uses_time_effect () =
   print_endline
     "✓ Tools.current_time.handler reads through Time_handler.install_fixed"
 
+(* ===== File_handler middleware ===== *)
+
+let test_with_sandbox_rejects_outside_root () =
+  let files = Hashtbl.create 4 in
+  Hashtbl.add files "/proj/a.ml" "ok";
+  Hashtbl.add files "/etc/passwd" "secret";
+  let chain =
+    File_handler.in_memory ~files
+    |> File_handler.with_sandbox ~root:"/proj"
+  in
+  File_handler.install chain (fun () ->
+      assert (Effect.perform (Effects.File_read "/proj/a.ml") = Ok "ok");
+      (match Effect.perform (Effects.File_read "/etc/passwd") with
+      | Error msg -> assert (Test_helpers.contains msg "escapes sandbox")
+      | Ok _ -> failwith "sandbox let /etc/passwd through");
+      (* prefix-confusion guard: /proj-evil should NOT match /proj *)
+      (match Effect.perform (Effects.File_read "/proj-evil/x") with
+      | Error _ -> ()
+      | Ok _ -> failwith "sandbox confused /proj-evil with /proj"));
+  print_endline
+    "✓ File_handler.with_sandbox rejects paths outside root (no prefix \
+     confusion)"
+
+let test_with_audit_observes_every_op () =
+  let files = Hashtbl.create 4 in
+  Hashtbl.add files "/p/a.ml" "x";
+  let observed = ref [] in
+  let on_op ~op ~path ~ok =
+    observed := (op, path, ok) :: !observed
+  in
+  let chain =
+    File_handler.in_memory ~files |> File_handler.with_audit ~on_op
+  in
+  File_handler.install chain (fun () ->
+      let _ = Effect.perform (Effects.File_read "/p/a.ml") in
+      let _ = Effect.perform (Effects.File_read "/missing") in
+      let _ =
+        Effect.perform
+          (Effects.File_write { path = "/p/b.ml"; content = "y" })
+      in
+      let _ = Effect.perform (Effects.File_stat "/p") in
+      ());
+  let log = List.rev !observed in
+  (match log with
+  | [
+      (`Read, "/p/a.ml", true);
+      (`Read, "/missing", false);
+      (`Write, "/p/b.ml", true);
+      (`Stat, "/p", true);
+    ] -> ()
+  | _ -> failwith "audit log doesn't match expected sequence");
+  print_endline "✓ File_handler.with_audit observes every op with success flag"
+
+let test_memory_persist_through_file_effects () =
+  (* Memory.persist should write to whatever File_handler is installed.
+     Verify by installing in-memory FS and checking the Hashtbl after. *)
+  let files = Hashtbl.create 4 in
+  File_handler.install (File_handler.in_memory ~files) (fun () ->
+      let mem = Memory.create ~dir:"/var/mem" ~name:"executor" () in
+      Memory.push mem (user_text_message "hi");
+      Memory.push mem (assistant_text_message "hello");
+      Memory.persist mem);
+  let body = Hashtbl.find files "/var/mem/executor.json" in
+  assert (Test_helpers.contains body "\"messages\"");
+  assert (Test_helpers.contains body "hi");
+  assert (Test_helpers.contains body "hello");
+  print_endline "✓ Memory.persist writes through File_handler.install"
+
+let test_memory_create_loads_prior_through_file_effects () =
+  (* Pre-seed the virtual FS with a memory file, then Memory.create
+     should pick it up via File_read. *)
+  let files = Hashtbl.create 4 in
+  let body =
+    {|{"model": "test", "messages": [
+       {"role": "user", "content": [{"type": "text", "text": "earlier"}]}
+     ], "pending_tool_use_id": null}|}
+  in
+  Hashtbl.add files "/var/mem/executor.json" body;
+  File_handler.install (File_handler.in_memory ~files) (fun () ->
+      let mem = Memory.create ~dir:"/var/mem" ~name:"executor" () in
+      assert (Memory.length mem = 1);
+      let msgs = Memory.to_messages mem in
+      match msgs with
+      | [ { role = User; content = [ Text "earlier" ] } ] -> ()
+      | _ -> failwith "memory didn't reload prior message");
+  print_endline
+    "✓ Memory.create reloads prior messages through File_handler.install"
+
+let test_with_read_cache_avoids_reread () =
+  let files = Hashtbl.create 4 in
+  Hashtbl.add files "/p/a.ml" "v1";
+  let read_count = ref 0 in
+  let inner =
+    let base = File_handler.in_memory ~files in
+    {
+      base with
+      read =
+        (fun path ->
+          incr read_count;
+          base.read path);
+    }
+  in
+  let chain = File_handler.with_read_cache inner in
+  File_handler.install chain (fun () ->
+      assert (Effect.perform (Effects.File_read "/p/a.ml") = Ok "v1");
+      assert (Effect.perform (Effects.File_read "/p/a.ml") = Ok "v1");
+      assert (Effect.perform (Effects.File_read "/p/a.ml") = Ok "v1");
+      assert (!read_count = 1);
+      (* Write must evict the cached entry. *)
+      let _ =
+        Effect.perform
+          (Effects.File_write { path = "/p/a.ml"; content = "v2" })
+      in
+      assert (Effect.perform (Effects.File_read "/p/a.ml") = Ok "v2");
+      assert (!read_count = 2));
+  print_endline
+    "✓ File_handler.with_read_cache memoizes reads; writes evict the path"
+
 let run () =
   test_time_now_default_handler_returns_real_time ();
   test_time_now_fixed_handler_returns_canned ();
@@ -112,4 +232,9 @@ let run () =
   test_file_handler_list_dir_returns_basenames ();
   test_file_handler_read_missing_returns_error ();
   test_view_file_tool_uses_file_effects ();
-  test_current_time_tool_uses_time_effect ()
+  test_current_time_tool_uses_time_effect ();
+  test_with_sandbox_rejects_outside_root ();
+  test_with_audit_observes_every_op ();
+  test_with_read_cache_avoids_reread ();
+  test_memory_persist_through_file_effects ();
+  test_memory_create_loads_prior_through_file_effects ()

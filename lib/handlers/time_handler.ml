@@ -1,10 +1,17 @@
-(** Production handler for [Effects.Time_now].
+(** Handler for [Effects.Time_now], composable via [|>].
 
-    Pulls real wall-clock time from [Unix.gettimeofday]. Mockable
-    handlers (tests, Checkpoint replay) install a different one that
-    returns canned values for determinism. *)
+    [t] is just a thunk producing a timestamp. [direct] reads the real
+    clock; [fixed] returns a canned value. Middleware (none yet) would
+    take a [t] and return a wrapped [t] — same pattern as
+    [Llm_handler] / [Tool_handler]. *)
 
-let install (thunk : unit -> 'a) : 'a =
+type t = unit -> float
+
+let direct : t = Unix.gettimeofday
+
+let fixed (now : float) : t = fun () -> now
+
+let install (chain : t) (thunk : unit -> 'a) : 'a =
   Effect.Deep.try_with thunk ()
     {
       effc =
@@ -13,20 +20,9 @@ let install (thunk : unit -> 'a) : 'a =
           | Effects.Time_now ->
               Some
                 (fun (k : (a, _) Effect.Deep.continuation) ->
-                  Effect.Deep.continue k (Unix.gettimeofday ()))
+                  Effect.Deep.continue k (chain ()))
           | _ -> None);
     }
 
-(** Test handler: returns a fixed value for every [Time_now] perform. *)
-let install_fixed ~(now : float) (thunk : unit -> 'a) : 'a =
-  Effect.Deep.try_with thunk ()
-    {
-      effc =
-        (fun (type a) (eff : a Effect.t) ->
-          match eff with
-          | Effects.Time_now ->
-              Some
-                (fun (k : (a, _) Effect.Deep.continuation) ->
-                  Effect.Deep.continue k now)
-          | _ -> None);
-    }
+(** Convenience for tests / Checkpoint replay. *)
+let install_fixed ~(now : float) thunk = install (fixed now) thunk

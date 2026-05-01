@@ -20,6 +20,8 @@ type config = {
   emit_governor_events_to_log : bool;
       (** When true, every Governor.Tick gets logged via [on_log] — the
           ["[gov] ..."] lines you see during dev runs. Off in tests. *)
+  sandbox_root : string option;
+      (** Restrict File_* ops to this prefix when set. *)
 }
 
 (* ===== chain builders ===== *)
@@ -73,8 +75,14 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
             (Printf.sprintf "[gov] %s" (Governor.Event.to_string ev)))
       inner
   in
+  let file_chain =
+    match config.sandbox_root with
+    | None -> File_handler.direct
+    | Some root -> File_handler.direct |> File_handler.with_sandbox ~root
+  in
   let with_io inner =
-    Time_handler.install (fun () -> File_handler.install inner)
+    Time_handler.install Time_handler.direct (fun () ->
+        File_handler.install file_chain inner)
   in
   match config.tape_path with
   | None ->

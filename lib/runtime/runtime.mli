@@ -16,6 +16,10 @@ type config = {
       (** Demo / testing only — abort after N live LLM calls. *)
   emit_governor_events_to_log : bool;
       (** Stream Governor ticks through [on_log] (the ["[gov] ..."] lines). *)
+  sandbox_root : string option;
+      (** When set, layer [File_handler.with_sandbox ~root] on top of the
+          production File handler so all file ops outside [root] are
+          rejected with [Error]. *)
 }
 
 (** Compose the effect handler stack and run [thunk] inside it. Returns

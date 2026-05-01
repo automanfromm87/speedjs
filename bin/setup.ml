@@ -114,6 +114,7 @@ let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
     tape_path = args.tape;
     crash_after = args.crash_after;
     emit_governor_events_to_log = Sys.getenv_opt "SPEEDJS_QUIET" = None;
+    sandbox_root = args.sandbox_root;
   }
 
 (** Compose runtime + run thunk. Thin wrapper around

@@ -62,6 +62,8 @@ type t = {
   log_file : string option;
   working_dir : string option;
   memory_dir : string option;
+  sandbox_root : string option;
+      (** When set, all File_* effects are restricted to this prefix. *)
 }
 
 let default_walltime = 1800.0
@@ -76,6 +78,8 @@ let usage () =
     "  --walltime SEC (0=off, default 1800)  --no-loop-guard";
   prerr_endline
     "  --skills-dir PATH  --working-dir PATH  --memory-dir PATH";
+  prerr_endline
+    "  --sandbox PATH (restrict file ops to this prefix)";
   prerr_endline
     "  --log-file PATH  --session PATH  --mcp \"cmd args\" (repeatable)";
   prerr_endline "  --debug-request";
@@ -112,6 +116,7 @@ let parse argv : t =
   let log_file = ref None in
   let working_dir = ref None in
   let memory_dir = ref None in
+  let sandbox_root = ref None in
   let max_steps = ref None in
   let max_tool_calls = ref None in
   let max_subagent_depth = ref None in
@@ -139,6 +144,7 @@ let parse argv : t =
     | "--log-file" -> log_file := Some (arg "--log-file")
     | "--working-dir" -> working_dir := Some (arg "--working-dir")
     | "--memory-dir" -> memory_dir := Some (arg "--memory-dir")
+    | "--sandbox" -> sandbox_root := Some (arg "--sandbox")
     | "--max-steps" -> max_steps := Some (int_of_string (arg "--max-steps"))
     | "--max-tool-calls" ->
         max_tool_calls := Some (int_of_string (arg "--max-tool-calls"))
@@ -176,6 +182,7 @@ let parse argv : t =
         log_file = !log_file;
         working_dir = !working_dir;
         memory_dir = !memory_dir;
+        sandbox_root = !sandbox_root;
         max_steps = !max_steps;
         max_tool_calls = !max_tool_calls;
         max_subagent_depth = !max_subagent_depth;
@@ -204,6 +211,9 @@ let active_flags (args : t) : string list =
     | None -> None);
     (match args.memory_dir with
     | Some _ -> Some "memory-persist"
+    | None -> None);
+    (match args.sandbox_root with
+    | Some r -> Some (Printf.sprintf "sandbox(%s)" r)
     | None -> None);
   ]
   |> List.filter_map Fun.id
