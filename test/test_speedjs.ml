@@ -12,5 +12,6 @@ let () =
   Test_tool_handler.run ();
   Test_governor.run ();
   Test_effects.run ();
+  Test_e2e.run ();
   Test_stability.run ();
   print_endline "\nAll tests passed.\n"
