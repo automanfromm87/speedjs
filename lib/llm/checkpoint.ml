@@ -212,6 +212,9 @@ let with_tape_llm (s : session) (inner : Llm_handler.t) : Llm_handler.t =
 let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
     f =
   let open Effect.Deep in
+  let find_tool name =
+    List.find_opt (fun (t : Types.tool_def) -> t.name = name) tools
+  in
   let rec wrap : type r. (unit -> r) -> r =
    fun thunk ->
     try_with thunk ()
@@ -234,23 +237,43 @@ let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
                           failwith
                             "tape misalignment: expected tool_batch, got LLM"
                       | [] ->
-                          (* Live: dispatch through chain, record batch.
-                             Reuses [Tool_handler.dispatch_one] +
-                             [truncate_result] so dispatch logic stays
-                             single-source. *)
+                          (* Live: emit Tool_started ticks on main fiber
+                             (workers can't perform effects), then dispatch
+                             through chain, then emit Tool_finished /
+                             Tool_timeout from main fiber. *)
+                          List.iter
+                            (fun (id, name, input) ->
+                              Tool_handler.perform_tool_started_tick ~name
+                                ~use_id:id ~input)
+                            uses;
                           let one_with_truncate use =
                             let _, name, _ = use in
+                            let t0 = Unix.gettimeofday () in
                             let id, r =
                               Tool_handler.dispatch_one ~chain ~tools use
                             in
-                            (id, Tool_handler.truncate_result name r)
+                            let duration = Unix.gettimeofday () -. t0 in
+                            (id, name, Tool_handler.truncate_result name r,
+                             duration)
                           in
-                          let truncated =
+                          let timed =
                             match uses with
                             | [ single ] ->
                                 [ wrap (fun () -> one_with_truncate single) ]
                             | _ ->
                                 Parallel.map_threaded one_with_truncate uses
+                          in
+                          List.iter
+                            (fun (id, name, r, duration) ->
+                              match find_tool name with
+                              | Some tool ->
+                                  Tool_handler.perform_tool_finished_ticks
+                                    ~tool ~use_id:id ~ok:(Result.is_ok r)
+                                    ~duration
+                              | None -> ())
+                            timed;
+                          let truncated =
+                            List.map (fun (id, _, r, _) -> (id, r)) timed
                           in
                           let saved =
                             List.map

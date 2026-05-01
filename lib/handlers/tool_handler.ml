@@ -239,43 +239,31 @@ let with_audit ?(on_call = fun _ -> ())
 
 (* ===== Middleware: log ===== *)
 
-(** Emit [Governor.Tick] events around each tool call: [Tool_started]
-    pre-dispatch, [Tool_finished] (with measured duration) post, and
-    [Tool_timeout] when the duration exceeds the tool's declared
-    [timeout_sec] metadata. The input digest is MD5 hex so the Governor
-    can compare without holding large payloads. *)
-let with_governor_ticks (inner : t) : t =
- fun args ->
+(** Tick emission for batches. Lives outside the chain because parallel
+    batches dispatch via [Parallel.map_threaded] — OCaml 5 effect handlers
+    don't propagate to threads, so [Effect.perform (Governor.Tick _)] from
+    a worker thread would crash with [Effect.Unhandled]. The installer
+    emits ticks on the main fiber before/after the parallel map. *)
+
+(* Silently drop ticks when no Governor is installed (e.g. unit tests
+   that exercise Tool_handler standalone). The chain remains usable
+   without Governor; Governor just observes nothing. *)
+let safe_tick ev =
+  try Effect.perform (Governor.Tick ev)
+  with Effect.Unhandled _ -> ()
+
+let perform_tool_started_tick ~name ~use_id ~input =
   let digest =
-    Digest.to_hex (Digest.string (Yojson.Safe.to_string args.input))
+    Digest.to_hex (Digest.string (Yojson.Safe.to_string input))
   in
-  Effect.perform
-    (Governor.Tick
-       (Tool_started
-          {
-            name = args.tool.name;
-            use_id = args.use_id;
-            input_digest = digest;
-          }));
-  let t0 = Unix.gettimeofday () in
-  let result = inner args in
-  let duration = Unix.gettimeofday () -. t0 in
-  Effect.perform
-    (Governor.Tick
-       (Tool_finished
-          {
-            name = args.tool.name;
-            use_id = args.use_id;
-            ok = Result.is_ok result;
-            duration;
-          }));
-  (match args.tool.timeout_sec with
+  safe_tick (Tool_started { name; use_id; input_digest = digest })
+
+let perform_tool_finished_ticks ~tool ~use_id ~ok ~duration =
+  safe_tick (Tool_finished { name = tool.name; use_id; ok; duration });
+  match tool.timeout_sec with
   | Some budget when duration > budget ->
-      Effect.perform
-        (Governor.Tick
-           (Tool_timeout { name = args.tool.name; duration; budget }))
-  | _ -> ());
-  result
+      safe_tick (Tool_timeout { name = tool.name; duration; budget })
+  | _ -> ()
 
 (** Compact one-line log before/after each tool call, including the
     tool's category metadata. *)
@@ -330,11 +318,17 @@ let truncate_result name r =
     and dispatches each tool through the chain; for batches of 2+,
     runs in parallel via threads.
 
+    Governor ticks ([Tool_started]/[Tool_finished]/[Tool_timeout]) are
+    emitted on the main fiber, around the dispatch. Worker threads only
+    run the chain + measure duration — they never perform effects, since
+    effect handlers don't propagate to threads.
+
     The recursive [wrap] lets tools that perform their own effects
     (notably [delegate], spawning sub-agents) propagate their effects
     through the SAME handler stack. *)
 let install ~tools (chain : t) f =
   let open Effect.Deep in
+  let find_tool name = List.find_opt (fun (t : tool_def) -> t.name = name) tools in
   let rec wrap : type r. (unit -> r) -> r =
    fun thunk ->
     try_with thunk ()
@@ -345,17 +339,33 @@ let install ~tools (chain : t) f =
             | Effects.Tool_calls uses ->
                 Some
                   (fun (k : (a, _) continuation) ->
+                    List.iter
+                      (fun (id, name, input) ->
+                        perform_tool_started_tick ~name ~use_id:id ~input)
+                      uses;
                     let one_call use =
+                      let _, name, _ = use in
+                      let t0 = Unix.gettimeofday () in
                       let id, raw = dispatch_one ~chain ~tools use in
-                      (id, truncate_result (let _, name, _ = use in name) raw)
+                      let duration = Unix.gettimeofday () -. t0 in
+                      (id, name, truncate_result name raw, duration)
                     in
-                    let results =
+                    let timed =
                       match uses with
                       | [ single ] ->
-                          (* Re-install handler so tools that perform
-                             effects (delegate) reach the outer stack. *)
                           [ wrap (fun () -> one_call single) ]
                       | _ -> Parallel.map_threaded one_call uses
+                    in
+                    List.iter
+                      (fun (id, name, r, duration) ->
+                        match find_tool name with
+                        | Some tool ->
+                            perform_tool_finished_ticks ~tool ~use_id:id
+                              ~ok:(Result.is_ok r) ~duration
+                        | None -> ())
+                      timed;
+                    let results =
+                      List.map (fun (id, _, r, _) -> (id, r)) timed
                     in
                     continue k results)
             | _ -> None);

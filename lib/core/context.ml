@@ -49,23 +49,78 @@ module Strategy = struct
 
   let flat : t = Fun.id
 
-  (** Keep only the LAST [keep_recent] messages, dropping older ones in
-      bulk to stay under context limits. Note: may break Conversation
-      invariants (first message no longer User; tool_use without
-      matching tool_result if cut mid-pair) — [Anthropic.validate]
-      catches anything Anthropic would reject. *)
+  let drop_first_n n msgs =
+    let rec skip k = function
+      | [] -> []
+      | _ :: rest when k > 0 -> skip (k - 1) rest
+      | rest -> rest
+    in
+    skip n msgs
+
+  (** Drop leading User turns (which after a cut may carry [Tool_result]
+      blocks pointing at now-dropped [Tool_use]s — Anthropic 400s). The
+      first kept turn must be Assistant so the prepended synthetic User
+      preserves alternation. *)
+  let drop_leading_user msgs =
+    let rec loop = function
+      | { role = User; _ } :: rest -> loop rest
+      | other -> other
+    in
+    loop msgs
+
+  let truncated_marker n_dropped =
+    user_text_message
+      (Printf.sprintf
+         "[earlier conversation truncated — %d message(s) dropped to keep \
+          context bounded]"
+         n_dropped)
+
+  (** Cut [drop] messages off the front, then repair invariants:
+        - first message must be User
+        - User turns can't carry tool_results without matching tool_use
+      Strategy: skip leading User turns post-cut (they may have orphan
+      tool_results), then prepend a synthetic User text turn so the
+      kept stream starts User → Assistant → User → ... *)
+  let safe_cut ~drop msgs =
+    let after_drop = drop_first_n drop msgs in
+    let kept = drop_leading_user after_drop in
+    let n_dropped = List.length msgs - List.length kept in
+    truncated_marker n_dropped :: kept
+
+  (** Keep only the LAST [keep_recent] messages (approximately —
+      orphan-User turns are dropped and a synthetic prefix is added,
+      so final length may be slightly off). The synthetic prefix
+      preserves Anthropic's "first message = User" invariant and
+      avoids dangling tool_result blocks. *)
   let sliding_window ~keep_recent : t =
    fun msgs ->
     let n = List.length msgs in
     if n <= keep_recent then msgs
-    else
-      let drop = n - keep_recent in
-      let rec skip k = function
-        | [] -> []
-        | _ :: rest when k > 0 -> skip (k - 1) rest
-        | rest -> rest
-      in
-      skip drop msgs
+    else safe_cut ~drop:(n - keep_recent) msgs
+
+  (** Soft-trigger sliding window with a frozen cut anchor.
+      Stateful: each call to [sliding_window_at] returns a fresh
+      closure with its own [cut_at] ref. Cache stability requires that
+      successive calls drop the SAME prefix, so callers must reuse the
+      SAME closure within a run (and create a NEW one per run).
+
+      Algorithm:
+      - On first call where messages exceed [trigger_at], freeze
+        [cut_at = n - keep_recent] so the kept suffix starts after a
+        stable index.
+      - On subsequent calls, keep applying that [cut_at] until the
+        effective (un-cut) length crosses [trigger_at] again, at which
+        point we re-anchor.
+
+      Result: between trims, the cached prompt prefix (system + tools +
+      first kept turn) stays stable across many LLM calls. *)
+  let sliding_window_at ~trigger_at ~keep_recent : t =
+    let cut_at = ref 0 in
+    fun msgs ->
+      let n = List.length msgs in
+      let effective = n - !cut_at in
+      if effective > trigger_at then cut_at := n - keep_recent;
+      if !cut_at > 0 then safe_cut ~drop:!cut_at msgs else msgs
 
   (** When the conversation has more than [compact_at] messages, replace
       the oldest [n - keep_recent] with a single User turn containing

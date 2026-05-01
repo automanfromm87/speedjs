@@ -666,6 +666,55 @@ let test_load_skill_tool_dispatch () =
   print_endline
     "✓ load_skill tool returns body on hit, lists available on miss"
 
+let test_load_skill_tool_memoizes_within_run () =
+  let skills =
+    [
+      Skill.{
+        name = "demo";
+        description = "demo skill";
+        body = "BIG BODY CONTENT";
+        source_path = "";
+      };
+      Skill.{
+        name = "other";
+        description = "other skill";
+        body = "OTHER BODY";
+        source_path = "";
+      };
+    ]
+  in
+  let tool = Skill.make_load_skill_tool skills in
+  (* First call returns full body. *)
+  (match tool.handler (`Assoc [ ("name", `String "demo") ]) with
+  | Ok body -> assert (body = "BIG BODY CONTENT")
+  | Error e -> failwith ("first call: " ^ e));
+  (* Second call to SAME skill returns short stub, not body. *)
+  (match tool.handler (`Assoc [ ("name", `String "demo") ]) with
+  | Ok msg ->
+      assert (msg <> "BIG BODY CONTENT");
+      assert (
+        let needle = "already loaded" in
+        let nlen = String.length needle in
+        let mlen = String.length msg in
+        let rec loop i =
+          if i + nlen > mlen then false
+          else if String.sub msg i nlen = needle then true
+          else loop (i + 1)
+        in
+        loop 0)
+  | Error e -> failwith ("second call: " ^ e));
+  (* DIFFERENT skill on the same tool still returns full body. *)
+  (match tool.handler (`Assoc [ ("name", `String "other") ]) with
+  | Ok body -> assert (body = "OTHER BODY")
+  | Error e -> failwith ("other call: " ^ e));
+  (* And a fresh tool instance has independent memo. *)
+  let tool2 = Skill.make_load_skill_tool skills in
+  (match tool2.handler (`Assoc [ ("name", `String "demo") ]) with
+  | Ok body -> assert (body = "BIG BODY CONTENT")
+  | Error e -> failwith ("fresh tool: " ^ e));
+  print_endline
+    "✓ load_skill memoizes per-tool: 2nd call to same skill returns stub"
+
 let test_planner_invalid_no_submit () =
   let bad_response =
     {
@@ -881,8 +930,187 @@ let test_context_to_llm_args_carries_strategy () =
       ~strategy:(Speedjs.Context.Strategy.sliding_window ~keep_recent:2)
       ctx
   in
-  assert (List.length windowed.messages = 2);
+  (* Expect 3: synthetic User marker + last 2 kept (Assistant, User). *)
+  assert (List.length windowed.messages = 3);
+  assert ((List.hd windowed.messages).role = User);
   print_endline "✓ Context.to_llm_args applies sliding_window strategy"
+
+(* Helpers for sliding_window tests: build realistic ReAct-style turn
+   sequences. After [user_text q], pairs alternate Assistant tool_use /
+   User tool_result. *)
+let mk_user_text s : Speedjs.Types.message =
+  { role = User; content = [ Text s ] }
+
+let mk_asst_tool_use id : Speedjs.Types.message =
+  {
+    role = Assistant;
+    content =
+      [
+        Tool_use
+          { id; name = "noop"; input = `Assoc [ ("k", `String id) ] };
+      ];
+  }
+
+let mk_user_tool_result id : Speedjs.Types.message =
+  {
+    role = User;
+    content =
+      [
+        Tool_result
+          { tool_use_id = id; content = "ok " ^ id; is_error = false };
+      ];
+  }
+
+(** Build a list of [n] messages: User-text query, then alternating
+    Assistant tool_use / User tool_result pairs. Total length [n]
+    starting with one User text turn. *)
+let build_react_msgs ~n =
+  if n <= 0 then []
+  else
+    let head = mk_user_text "Q" in
+    let rec pairs k acc =
+      if k <= 0 then List.rev acc
+      else
+        let id = Printf.sprintf "u%d" k in
+        pairs (k - 1) (mk_user_tool_result id :: mk_asst_tool_use id :: acc)
+    in
+    head :: pairs ((n - 1) / 2) []
+    |> fun l -> if List.length l > n then List.filteri (fun i _ -> i < n) l else l
+
+let truncated_marker_prefix = "[earlier conversation truncated"
+
+let is_truncated_marker (m : Speedjs.Types.message) =
+  m.role = User
+  && (match m.content with
+      | [ Text s ] ->
+          String.length s >= String.length truncated_marker_prefix
+          && String.sub s 0 (String.length truncated_marker_prefix)
+             = truncated_marker_prefix
+      | _ -> false)
+
+let test_sliding_window_at_below_trigger_passes_through () =
+  let strat =
+    Speedjs.Context.Strategy.sliding_window_at ~trigger_at:10 ~keep_recent:4
+  in
+  let msgs = build_react_msgs ~n:6 in
+  let out = strat msgs in
+  assert (out = msgs);
+  print_endline
+    "✓ sliding_window_at: below trigger returns messages unchanged"
+
+let test_sliding_window_at_first_trim_invariants () =
+  let strat =
+    Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
+  in
+  let msgs = build_react_msgs ~n:11 in
+  let out = strat msgs in
+  (* Invariant 1: shorter than input. *)
+  assert (List.length out < List.length msgs);
+  (* Invariant 2: first message is the truncated marker (User text). *)
+  assert (is_truncated_marker (List.hd out));
+  (* Invariant 3: second message is Assistant (no orphan
+     User-tool_result at front after marker). *)
+  assert ((List.nth out 1).role = Assistant);
+  (* Invariant 4: no Tool_result blocks in out[1..] map to dropped
+     Tool_use ids. Because we kept a contiguous suffix and
+     drop_leading_user discarded any orphans. *)
+  let kept_use_ids = ref [] in
+  List.iter
+    (fun (m : Speedjs.Types.message) ->
+      List.iter
+        (function
+          | Speedjs.Types.Tool_use { id; _ } ->
+              kept_use_ids := id :: !kept_use_ids
+          | _ -> ())
+        m.content)
+    out;
+  List.iter
+    (fun (m : Speedjs.Types.message) ->
+      List.iter
+        (function
+          | Speedjs.Types.Tool_result { tool_use_id; _ } ->
+              assert (List.mem tool_use_id !kept_use_ids)
+          | _ -> ())
+        m.content)
+    out;
+  print_endline
+    "✓ sliding_window_at: first trim adds marker, drops orphans, keeps \
+     User-first invariant"
+
+let test_sliding_window_at_freezes_cut_anchor () =
+  (* After the first trim, repeated calls with the SAME message list
+     must return the SAME result. AND when 2 more turns are appended,
+     the kept suffix must START at the SAME original index — meaning
+     the message right after the marker is the SAME object as before,
+     proving the cache prefix is stable. *)
+  let strat =
+    Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
+  in
+  let msgs1 = build_react_msgs ~n:11 in
+  let out1 = strat msgs1 in
+  let out1_again = strat msgs1 in
+  assert (List.length out1 = List.length out1_again);
+  let first_kept_a = List.nth out1 1 in
+  let first_kept_b = List.nth out1_again 1 in
+  assert (first_kept_a == first_kept_b);
+  (* Extend by 2 messages — should NOT re-trim because effective is
+     still under trigger. The first kept message must STILL be the
+     same physical message (cache prefix preserved). *)
+  let extra =
+    [ mk_asst_tool_use "ext1"; mk_user_tool_result "ext1" ]
+  in
+  let msgs2 = msgs1 @ extra in
+  let out2 = strat msgs2 in
+  assert (is_truncated_marker (List.hd out2));
+  let first_kept_c = List.nth out2 1 in
+  assert (first_kept_c == first_kept_a);
+  print_endline
+    "✓ sliding_window_at: cut anchor frozen across calls (cache prefix \
+     stable)"
+
+let test_sliding_window_at_retrims_when_effective_exceeds_again () =
+  (* Once the un-cut suffix grows past trigger again, cut_at advances:
+     a NEW first-kept message replaces the old one. This is the only
+     time the cache prefix changes. *)
+  let strat =
+    Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
+  in
+  let msgs1 = build_react_msgs ~n:11 in
+  let out1 = strat msgs1 in
+  let first_after_marker_1 = List.nth out1 1 in
+  (* Add 8 more turns — effective definitely exceeds trigger again. *)
+  let rec append_pairs k acc =
+    if k <= 0 then acc
+    else
+      let id = Printf.sprintf "x%d" k in
+      append_pairs (k - 1)
+        (acc @ [ mk_asst_tool_use id; mk_user_tool_result id ])
+  in
+  let msgs2 = append_pairs 4 msgs1 in
+  let out2 = strat msgs2 in
+  let first_after_marker_2 = List.nth out2 1 in
+  assert (not (first_after_marker_1 == first_after_marker_2));
+  assert (is_truncated_marker (List.hd out2));
+  print_endline
+    "✓ sliding_window_at: re-trims (advances cut_at) when effective \
+     length crosses trigger again"
+
+let test_sliding_window_at_factory_independent_state () =
+  (* Two factory invocations must produce strategies with independent
+     [cut_at] state — calling one must not affect the other. *)
+  let make () =
+    Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
+  in
+  let s1 = make () in
+  let s2 = make () in
+  let trigger_msgs = build_react_msgs ~n:11 in
+  let small_msgs = build_react_msgs ~n:4 in
+  let _ = s1 trigger_msgs in
+  (* s2 should still be in fresh state — small input passes through. *)
+  let out_s2 = s2 small_msgs in
+  assert (out_s2 = small_msgs);
+  print_endline
+    "✓ sliding_window_at: factory yields independent per-instance state"
 
 (* ===== Llm_handler chain (composable middleware) tests ===== *)
 
@@ -1610,6 +1838,7 @@ let () =
   test_skill_render_index_empty ();
   test_skill_render_index_with_skills ();
   test_load_skill_tool_dispatch ();
+  test_load_skill_tool_memoizes_within_run ();
   test_planner_parses_submit_plan ();
   test_planner_invalid_no_submit ();
   test_conversation_empty_state ();
@@ -1624,6 +1853,11 @@ let () =
   test_conversation_round_trip_legitimate_dangling ();
   test_context_renders_system_with_env ();
   test_context_to_llm_args_carries_strategy ();
+  test_sliding_window_at_below_trigger_passes_through ();
+  test_sliding_window_at_first_trim_invariants ();
+  test_sliding_window_at_freezes_cut_anchor ();
+  test_sliding_window_at_retrims_when_effective_exceeds_again ();
+  test_sliding_window_at_factory_independent_state ();
   test_context_compacted_strategy ();
   test_llm_handler_chain_validates_messages ();
   test_llm_handler_chain_cost_tracking ();

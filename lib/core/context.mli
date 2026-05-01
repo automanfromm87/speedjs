@@ -59,8 +59,15 @@ module Strategy : sig
   val flat : t
 
   (** Keep the LAST [keep_recent] messages, drop older ones. May break
-      Conversation invariants — boundary [validate] is the safety net. *)
+      Conversation invariants — boundary [validate] is the safety net.
+      Trims on EVERY call once exceeded — invalidates prompt cache
+      every time. Use [sliding_window_at] when cache matters. *)
   val sliding_window : keep_recent:int -> t
+
+  (** Soft-trigger sliding window: only trim once messages exceed
+      [trigger_at], then drop down to [keep_recent]. The headroom
+      preserves cache stability across the calls in between. *)
+  val sliding_window_at : trigger_at:int -> keep_recent:int -> t
 
   (** Replace oldest messages with a single summarized User turn when
       total exceeds [compact_at]. [compactor] is invoked on the

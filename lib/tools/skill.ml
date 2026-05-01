@@ -262,6 +262,13 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
   let table = Hashtbl.create (List.length skills) in
   List.iter (fun s -> Hashtbl.replace table s.name s) skills;
   let names = List.map (fun s -> s.name) skills in
+  (* Per-run memo: skill name -> first-load message preview. Subsequent
+     loads of the same skill return a short stub instead of the full
+     ~9KB body, which would otherwise pile up in conversation history
+     across plan-act sub-agents (planner / executor / recovery each
+     freshly invoke load_skill, but the body is already cached by the
+     LLM via prompt-cache). *)
+  let loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   Types.
     {
       idempotent = true;
@@ -273,7 +280,9 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
          current task falls into the skill's domain (see the skill index in \
          the system prompt). Don't pre-load skills speculatively — only \
          when you're about to act in that domain. The body stays in context \
-         for the rest of the task.";
+         for the rest of the task. (Subsequent calls in the same run \
+         return a short stub — the original body is already in your \
+         conversation history.)";
       input_schema =
         `Assoc
           [
@@ -300,7 +309,18 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
               match List.assoc_opt "name" fields with
               | Some (`String name) -> (
                   match Hashtbl.find_opt table name with
-                  | Some s -> Ok s.body
+                  | Some s ->
+                      if Hashtbl.mem loaded name then
+                        Ok
+                          (Printf.sprintf
+                             "[skill %S already loaded earlier in this \
+                              run — full body remains in your conversation \
+                              history; consult it there]"
+                             name)
+                      else begin
+                        Hashtbl.add loaded name ();
+                        Ok s.body
+                      end
                   | None ->
                       let avail =
                         match names with

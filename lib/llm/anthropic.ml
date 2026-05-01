@@ -67,8 +67,8 @@ let complete
     ?(base_url = Http.getenv_default "AGENT_LLM_BASE_URL" default_base_url)
     ?(proxy = Http.getenv_default "AGENT_LLM_PROXY" default_proxy)
     ?(api_key = Http.getenv_default "ANTHROPIC_API_KEY" "")
-    ?(model = default_model) ?(max_tokens = 4096) ?(tool_choice = Tc_auto)
-    ~system ~messages ~tools () : llm_response =
+    ?(model = default_model) ?(max_tokens = 32768)
+    ?(tool_choice = Tc_auto) ~system ~messages ~tools () : llm_response =
   validate_messages_or_fail messages;
   let body_json =
     Anthropic_req.build_request_body ~model ~system ~messages ~tools
@@ -107,7 +107,7 @@ let complete_stream
     ?(base_url = Http.getenv_default "AGENT_LLM_BASE_URL" default_base_url)
     ?(proxy = Http.getenv_default "AGENT_LLM_PROXY" default_proxy)
     ?(api_key = Http.getenv_default "ANTHROPIC_API_KEY" "")
-    ?(model = default_model) ?(max_tokens = 4096)
+    ?(model = default_model) ?(max_tokens = 32768)
     ?(on_text_delta = fun _ -> ()) ?(tool_choice = Tc_auto) ~system
     ~messages ~tools () : llm_response =
   validate_messages_or_fail messages;

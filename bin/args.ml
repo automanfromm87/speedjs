@@ -189,7 +189,7 @@ let active_flags (args : t) : string list =
     Some (if args.plan then "mode=plan-act" else "mode=react");
     Some "tool-truncation(12K)";
     Some "prompt-cache(3-tier)";
-    Some "sliding-window(20K trigger)";
+    (if args.plan then Some "executor-sliding-window(60→30)" else None);
     (if args.walltime > 0.0 then
        Some (Printf.sprintf "walltime(%.0fs)" args.walltime)
      else None);

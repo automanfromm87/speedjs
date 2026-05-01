@@ -131,6 +131,7 @@ let parse_task_submit (input : Yojson.Safe.t) : task_submit =
     helix-style continuity (early tasks' tool_calls become cache prefix
     for later ones, and the model "remembers" what was done). *)
 let run_for_task ?(max_iterations = Agent.default_max_iterations)
+    ?(strategy = Context.Strategy.flat)
     ?(prior_messages : message list = [])
     ?(env : (string * string) list = []) ~task_description ~tools () :
     task_run_outcome =
@@ -174,7 +175,7 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
   in
   try
     match
-      Agent.run_loop ~max_iterations
+      Agent.run_loop ~max_iterations ~strategy
         ~terminal_tools:[ submit_task_result_name ] ~ctx ()
     with
     | Ok (answer, ctx) ->
@@ -267,12 +268,12 @@ let survey_workspace ~working_dir : (string * string) list * string =
 
     [env] blocks (e.g. workspace_brief) ride at the system-prompt layer
     of the prompt cache, so they're shared across all tasks for free. *)
-let exec_one_task ~tools ~max_iterations ~env
+let exec_one_task ~tools ~max_iterations ~strategy ~env
     ~(prior_messages : message list) ~current_task :
     [ `Done of string * message list
     | `Failed of string * message list ] =
   match
-    run_for_task ~max_iterations ~prior_messages ~env
+    run_for_task ~max_iterations ~strategy ~prior_messages ~env
       ~task_description:current_task.description ~tools ()
   with
   | Task_done_explicit { submit; messages } ->
@@ -301,7 +302,20 @@ type config = {
   memory_dir : string option;
   model : string;
   planner_system_prompt : string option;
+  executor_strategy : unit -> Context.Strategy.t;
+      (** Factory, not a [Strategy.t] value: stateful strategies (e.g.
+          [sliding_window_at]) carry a per-instance [cut_at] ref that
+          must be fresh per run. The factory is called once per
+          [run] invocation. *)
 }
+
+(** Default executor strategy factory: soft-trigger sliding window.
+    The executor accumulates messages across tasks (helix-style memory)
+    and within each task — unbounded growth blows past 100K tokens on
+    long runs. Frozen cut anchor keeps the cached prompt prefix stable
+    between trims (~one trim per ~30 calls). *)
+let default_executor_strategy () =
+  Context.Strategy.sliding_window_at ~trigger_at:60 ~keep_recent:30
 
 let default_config =
   {
@@ -313,6 +327,7 @@ let default_config =
     memory_dir = None;
     model = Anthropic.default_model;
     planner_system_prompt = None;
+    executor_strategy = default_executor_strategy;
   }
 
 (** Top-level plan-act run.
@@ -327,7 +342,14 @@ let default_config =
 let run ?(config = default_config) ~goal ~tools () : agent_result =
   let { skip_summarizer; max_iterations_per_task = max_iter;
         max_task_retries; max_recoveries; working_dir; memory_dir;
-        model; planner_system_prompt } = config in
+        model; planner_system_prompt;
+        executor_strategy = executor_strategy_factory } = config in
+  (* Construct a fresh strategy ONCE per run. Sliding-window-style
+     strategies are stateful (cut_at ref); the same closure must be
+     reused across every executor LLM call within a run so the cache
+     prefix stays stable, but a NEW closure must be made for the next
+     run. *)
+  let executor_strategy = executor_strategy_factory () in
 
   (* Step 1: optional workspace survey. One LLM call; the brief is
      reused across planner + executor so marginal value is high.
@@ -406,7 +428,8 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
               let prior = Memory.to_messages exec_mem in
               match
                 exec_one_task ~tools ~max_iterations:max_iter
-                  ~env:exec_env ~prior_messages:prior ~current_task:task
+                  ~strategy:executor_strategy ~env:exec_env
+                  ~prior_messages:prior ~current_task:task
               with
               | `Done (answer, messages) ->
                   Memory.set exec_mem messages;

@@ -108,7 +108,11 @@ let build_llm_chain ~(args : Args.t) ~model ~cost ~on_log ~on_text_delta
     Same shape as the LLM chain: each middleware wraps the next. Note
     that [with_retry] only fires on tools whose [idempotent = true]
     metadata is set; non-idempotent tools (bash, write_file) are never
-    retried even on transient failures. *)
+    retried even on transient failures.
+
+    Tick emission lives in [Tool_handler.install] (not in this chain) so
+    that parallel batches dispatched via threads don't try to perform
+    effects on workers — handlers don't propagate across threads. *)
 let build_tool_chain ~on_log : Speedjs.Tool_handler.t =
   Speedjs.Tool_handler.direct
   |> Speedjs.Tool_handler.with_timeout ~default_sec:60.0
@@ -117,7 +121,6 @@ let build_tool_chain ~on_log : Speedjs.Tool_handler.t =
        ~policy:Speedjs.Llm_handler.Retry_policy.default
   |> Speedjs.Tool_handler.with_circuit_breaker ~failure_threshold:5
        ~cooldown:60.0
-  |> Speedjs.Tool_handler.with_governor_ticks
   |> Speedjs.Tool_handler.with_logging ~on_log
 
 (** Build the Log handler chain. *)

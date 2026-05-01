@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
-# speedjs dev runner — full Todo SPA build with all the goodies on:
-#   - plan-act mode
-#   - skill loading (frontend skill auto-injected into system prompt)
-#   - tape checkpoint (resume from crash)
-#   - log file (stdout stays clean — only final answer)
-#   - max_iters 100, retry, walltime, budget all configured
+# speedjs dev runner — full-stack Notes app stress test.
+#
+# Why this prompt: it forces the agent to use BOTH skills (backend +
+# frontend), plan across multiple components, agree on an API contract,
+# run real verification (pytest + npm build), and likely hit at least one
+# recovery cycle (cross-component contracts rarely land first try).
 #
 # Env vars (optional):
-#   RESUME=1            keep existing /tmp/todo-app and tape, continue from last run
+#   RESUME=1            keep existing project + tape, continue from last run
 #   SPEEDJS_LOG=path    override log destination (default /tmp/speedjs-run.log)
-#   SPEEDJS_TAPE=path   override tape file (default /tmp/todo-build.tape)
-#   SPEEDJS_PROJECT=dir override project dir (default /tmp/todo-app)
+#   SPEEDJS_TAPE=path   override tape file (default /tmp/notes-build.tape)
+#   SPEEDJS_PROJECT=dir override project root (default /tmp/notes-app)
 
 set -e
 
 LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-run.log}"
-TAPE_FILE="${SPEEDJS_TAPE:-/tmp/todo-build.tape}"
-PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/todo-app}"
+TAPE_FILE="${SPEEDJS_TAPE:-/tmp/notes-build.tape}"
+PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/notes-app}"
 SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skills"
 
-# Clean previous run unless RESUME=1 is set. Also wipes /tmp/speedjs-memory
-# so executor memory starts fresh — matters because continue.sh later loads
-# from the same dir, and stale memory would confuse the survey.
 if [ -z "${RESUME:-}" ]; then
   rm -rf "$PROJECT_DIR" "$TAPE_FILE" /tmp/speedjs-memory
 fi
@@ -34,46 +31,123 @@ echo
 
 dune exec speedjs -- \
   --plan \
-  --budget 5.0 \
-  --walltime 1800 \
-  --max-iters 100 \
+  --budget 10.0 \
+  --walltime 3600 \
+  --max-iters 150 \
   --max-retries 3 \
   --skills-dir "$SKILLS_DIR" \
+  --working-dir "$PROJECT_DIR" \
   --log-file "$LOG_FILE" \
   --tape "$TAPE_FILE" \
   --memory-dir "/tmp/speedjs-memory" \
-  "Build a production-quality Todo SPA at $PROJECT_DIR — pure frontend, no backend.
+  "Build a production-quality full-stack Notes app at $PROJECT_DIR.
 
-You have a 'frontend' skill available in your skill index (see <available_skills>
-in the system prompt). LOAD IT FIRST via the load_skill tool before scaffolding.
-The skill is opinionated and binding — it covers the stack, directory layout,
-all build gotchas (verbatimModuleSyntax, type-only imports, content paths),
-styling conventions, and Lucide icon usage. Don't deviate from what it says.
+Layout (TWO sibling projects under the root):
+  $PROJECT_DIR/api/    — FastAPI backend, SQLite via SQLAlchemy
+  $PROJECT_DIR/web/    — Vite + React + TypeScript frontend
 
-Goal:
-  Stack: Vite + React 18 + TypeScript + Tailwind v3 + Lucide.
-  Persist state in localStorage under key 'speedjs-todos'.
-  All styling via Tailwind utility classes only.
+You have TWO skills available (see <available_skills> in the system prompt):
+  - 'backend'   — opinionated Python/FastAPI/Pydantic v2/SQLAlchemy stack
+  - 'frontend'  — opinionated Vite/React/TS/Tailwind/Lucide stack
+LOAD BOTH via the load_skill tool BEFORE scaffolding the corresponding side.
+The skills are binding: stack, layout, conventions, gotchas — don't deviate.
 
-Required features:
-  - Add new todo (text input + Enter key)
-  - Toggle complete (checkbox)
-  - Delete todo (button with Trash2 icon, hover-revealed)
-  - Edit todo on double-click
-  - Filter tabs: All / Active / Completed
-  - 'Clear completed' button (only when there are completed todos)
-  - Counter: 'N items left'
-  - Empty state with ClipboardList icon when no todos
+============================================================================
+API CONTRACT (both sides MUST agree on this exact shape)
+============================================================================
 
-Constraints (absolute):
-  - NEVER run 'npm run dev' — interactive, will hang. Use 'npm run build' to verify.
-  - TypeScript strictly: no any, all functions typed, named props interfaces.
-  - Tailwind ONLY: no inline style={}, no separate .css files except index.css.
-  - Use Lucide icons (Trash2, Plus, Check, X, ClipboardList for empty state).
+Resource: Note
+  - id:         integer, server-assigned
+  - title:      string, 1–200 chars, required
+  - body:       string, 0–10000 chars, default ''
+  - pinned:     boolean, default false
+  - created_at: ISO-8601 string (UTC), server-assigned
+  - updated_at: ISO-8601 string (UTC), server-assigned
+
+Endpoints (all under /api/v1/notes):
+  GET    /                     → list notes, pinned first then by updated_at desc
+  POST   /                     → create. body: {title, body?, pinned?}
+  GET    /{id}                 → fetch one. 404 if missing.
+  PATCH  /{id}                 → partial update. body: any subset of {title, body, pinned}
+  DELETE /{id}                 → delete. 204 on success, 404 if missing.
+
+Validation:
+  - title trimmed; empty after trim → 422
+  - title > 200 chars → 422
+  - body > 10000 chars → 422
+  - PATCH with no fields → 422
+
+CORS: allow http://localhost:5173 (Vite default).
+
+============================================================================
+BACKEND ($PROJECT_DIR/api) — follow the 'backend' skill
+============================================================================
+
+  - SQLite file at api/notes.db (gitignored).
+  - SQLAlchemy 2.0 declarative models, async session.
+  - Pydantic v2 schemas: NoteCreate, NoteUpdate, NoteRead.
+  - Routes in app/routes/notes.py. App factory in app/main.py.
+  - Dependency-injected DB session.
+  - On startup: create tables if missing (no Alembic — keep it simple).
+
+Tests (pytest + httpx AsyncClient):
+  - tests/test_notes.py covering: create+read roundtrip; list ordering
+    (pinned-first); patch updates updated_at; delete then 404; validation
+    422 cases (empty title, oversized body, empty patch).
+  - Tests use a separate sqlite file (tmp_path fixture) — never the dev DB.
 
 Verification:
-  After writing all files, run 'npm run build' from the project dir. It MUST succeed
-  with zero TypeScript errors. If errors appear, fix them and rebuild until clean.
+  cd $PROJECT_DIR/api
+  uv sync
+  uv run pytest -q     # MUST pass with zero failures
 
-Final output:
-  Show the src tree, the build output, and a 3-sentence description of what was built."
+============================================================================
+FRONTEND ($PROJECT_DIR/web) — follow the 'frontend' skill
+============================================================================
+
+  - Vite + React 18 + TS + Tailwind v3 + Lucide.
+  - API client in src/lib/api.ts — typed wrappers per endpoint, base URL
+    from import.meta.env.VITE_API_BASE (default 'http://localhost:8000').
+  - State via React's useState + useEffect (no Redux/Zustand for this scope).
+
+UI features:
+  - List view with pinned notes pinned at top (Pin icon from Lucide).
+  - 'New note' form: title (required) + body (textarea) + pinned checkbox.
+  - Edit-in-place on row click (title + body + pinned toggle, Save/Cancel).
+  - Delete button with Trash2 icon (hover-revealed).
+  - Pin/unpin button toggles via PATCH.
+  - Empty state with NotebookPen icon when zero notes.
+  - Loading + error states for the initial fetch.
+
+Constraints:
+  - NEVER run 'npm run dev' or 'uv run uvicorn' — they hang. Use 'npm run build'
+    and 'uv run pytest' for verification ONLY.
+  - TypeScript strict: no any; named props interfaces; type-only imports
+    (verbatimModuleSyntax).
+  - Tailwind utility classes only — no inline style={}, no extra .css beyond
+    Tailwind's index.css.
+  - Use Lucide icons exclusively.
+
+Verification:
+  cd $PROJECT_DIR/web
+  npm install
+  npm run build       # MUST succeed with zero TS errors
+
+============================================================================
+ROOT
+============================================================================
+
+  - $PROJECT_DIR/README.md: 1-paragraph summary + how to run both sides
+    (start the API, then the web), plus the 'verify' commands above.
+  - $PROJECT_DIR/.gitignore covering node_modules/, dist/, __pycache__/,
+    .venv/, *.db, .pytest_cache/.
+
+============================================================================
+FINAL OUTPUT
+============================================================================
+
+After all verification commands pass, print:
+  1. Tree of $PROJECT_DIR (two levels deep, excluding node_modules/.venv/dist).
+  2. Last 20 lines of pytest output.
+  3. Last 10 lines of npm build output.
+  4. A 4-sentence summary describing the API contract and the UI."

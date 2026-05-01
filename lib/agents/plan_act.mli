@@ -20,6 +20,7 @@ val submit_task_result_tool : tool_def
     [env] blocks ride at the system-prompt layer (workspace_brief etc.). *)
 val run_for_task :
   ?max_iterations:int ->
+  ?strategy:Context.Strategy.t ->
   ?prior_messages:message list ->
   ?env:(string * string) list ->
   task_description:string ->
@@ -41,7 +42,17 @@ type config = {
       (** Enables cross-run executor memory persistence. *)
   model : string;
   planner_system_prompt : string option;
+  executor_strategy : unit -> Context.Strategy.t;
+      (** Factory for the per-task executor's context strategy. The
+          factory is called ONCE per [run] invocation, so stateful
+          strategies (like [sliding_window_at]) get fresh per-run state
+          and don't leak across runs. *)
 }
+
+(** Default factory: builds a fresh [sliding_window_at(60→30)] each
+    call. Use this in [config.executor_strategy] for the standard
+    soft-trigger sliding window with frozen cut anchor. *)
+val default_executor_strategy : unit -> Context.Strategy.t
 
 val default_config : config
 

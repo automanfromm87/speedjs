@@ -72,11 +72,6 @@ val with_audit :
   t ->
   t
 
-(** Emit [Governor.Tick] events around each tool call (Tool_started /
-    Tool_finished). Pair with [Governor.install] for global tool budget
-    + death-loop detection. *)
-val with_governor_ticks : t -> t
-
 (** Compact one-line in/out log per call, including category. *)
 val with_logging : ?on_log:(string -> unit) -> t -> t
 
@@ -85,7 +80,12 @@ val with_logging : ?on_log:(string -> unit) -> t -> t
 (** Install the chain as an effect handler around [thunk]. Catches
     [Effects.Tool_calls]; single-tool calls re-install the handler
     around invocation so [delegate]-style tools can perform their own
-    effects through the outer stack. *)
+    effects through the outer stack.
+
+    Emits [Governor.Tick] events ([Tool_started] / [Tool_finished] /
+    [Tool_timeout]) on the main fiber before/after dispatch — worker
+    threads can't perform effects, so tick emission can't live inside a
+    chain middleware. *)
 val install : tools:tool_def list -> t -> (unit -> 'a) -> 'a
 
 (* ===== Building blocks (also reused by [Checkpoint]) ===== *)
@@ -102,3 +102,16 @@ val dispatch_one :
 (** Apply tool-result truncation. [load_skill] is exempt — a partial
     skill body is worse than no skill at all. *)
 val truncate_result : string -> tool_handler_result -> tool_handler_result
+
+(** Perform [Governor.Tick (Tool_started ...)] on the current fiber. Must
+    be called from a fiber that has [Governor.install] in scope (i.e. the
+    main fiber) — used by tool installers to emit ticks before/after the
+    parallel-thread dispatch boundary. *)
+val perform_tool_started_tick :
+  name:string -> use_id:string -> input:Yojson.Safe.t -> unit
+
+(** Perform [Governor.Tick (Tool_finished ...)] and, if [duration]
+    exceeds [tool.timeout_sec], also emit [Tool_timeout]. Must run on
+    the main fiber for the same reason as [perform_tool_started_tick]. *)
+val perform_tool_finished_ticks :
+  tool:tool_def -> use_id:string -> ok:bool -> duration:float -> unit
