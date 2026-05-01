@@ -1,0 +1,10 @@
+(library
+ (name speedjs)
+ (libraries yojson unix threads.posix)
+ (flags
+  (:standard -w -27-32-33-26-69)))
+
+; Files live in concept-grouped subdirs (core/, llm/, handlers/, agents/,
+; tools/). Module names stay flat in the namespace via [unqualified] —
+; the directory layout is for human readability, not for callers.
+(include_subdirs unqualified)

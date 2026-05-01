@@ -1,0 +1,22 @@
+(** Effect declarations.
+
+    The agent code performs these effects without knowing how they are
+    handled. Different handlers (production / mock / replay / cost-tracking)
+    give the same agent code completely different runtime behavior. *)
+
+open Types
+
+type _ Effect.t +=
+  | Llm_complete : llm_call_args -> llm_response Effect.t
+      (** Call the LLM with messages + tools, optionally overriding the
+          system prompt and forcing a specific [tool_choice]. *)
+  | Tool_calls :
+      (string * string * Yojson.Safe.t) list
+      -> (string * tool_handler_result) list Effect.t
+      (** Execute one or more tools and return their results in input
+          order. Each tuple is [(tool_use_id, name, input)]; output is
+          [(tool_use_id, result)]. Single-tool case is just a 1-element
+          list (handlers may dispatch sequentially); 2+ tools may run in
+          parallel (production handler does this). *)
+  | Log : string -> unit Effect.t
+      (** Emit a log line. Handler decides where it goes. *)
