@@ -14,10 +14,15 @@
 
 set -e
 
+# Load local env overrides (gateway URL, proxy, API key, etc).
+# .env.local is gitignored; copy .env.local.example to start.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/.env.local" ] && . "$SCRIPT_DIR/.env.local"
+
 LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-run.log}"
 TAPE_FILE="${SPEEDJS_TAPE:-/tmp/notes-build.tape}"
 PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/notes-app}"
-SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skills"
+SKILLS_DIR="$SCRIPT_DIR/skills"
 
 if [ -z "${RESUME:-}" ]; then
   rm -rf "$PROJECT_DIR" "$TAPE_FILE" /tmp/speedjs-memory

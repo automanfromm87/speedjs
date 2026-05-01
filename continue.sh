@@ -30,11 +30,16 @@
 
 set -e
 
+# Load local env overrides (gateway URL, proxy, API key, etc).
+# .env.local is gitignored; copy .env.local.example to start.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/.env.local" ] && . "$SCRIPT_DIR/.env.local"
+
 LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-continue.log}"
 TAPE_FILE="${SPEEDJS_TAPE:-/tmp/todo-continue.tape}"
 MEMORY_DIR="${SPEEDJS_MEMORY:-/tmp/speedjs-memory}"
 PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/todo-app}"
-SKILLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skills"
+SKILLS_DIR="$SCRIPT_DIR/skills"
 
 # Pre-flight: the prior `./dev.sh` must have built the project.
 if [ ! -d "$PROJECT_DIR" ]; then
