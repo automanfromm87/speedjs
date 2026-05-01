@@ -269,70 +269,57 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
      freshly invoke load_skill, but the body is already cached by the
      LLM via prompt-cache). *)
   let loaded : (string, unit) Hashtbl.t = Hashtbl.create 4 in
-  Types.
-    {
-      idempotent = true;
-      timeout_sec = Some 1.0;
-      category = "meta";
-      name = load_skill_tool_name;
-      description =
-        "Load a skill's full body into the conversation. Use this when the \
-         current task falls into the skill's domain (see the skill index in \
-         the system prompt). Don't pre-load skills speculatively — only \
-         when you're about to act in that domain. The body stays in context \
-         for the rest of the task. (Subsequent calls in the same run \
-         return a short stub — the original body is already in your \
-         conversation history.)";
-      input_schema =
-        `Assoc
-          [
-            ("type", `String "object");
-            ( "properties",
-              `Assoc
-                [
-                  ( "name",
-                    `Assoc
-                      [
-                        ("type", `String "string");
-                        ( "description",
-                          `String
-                            "Exact skill name from the index (e.g. \
-                             \"react-testing\")" );
-                      ] );
-                ] );
-            ("required", `List [ `String "name" ]);
-          ];
-      handler =
-        (fun input ->
-          match input with
-          | `Assoc fields -> (
-              match List.assoc_opt "name" fields with
-              | Some (`String name) -> (
-                  match Hashtbl.find_opt table name with
-                  | Some s ->
-                      if Hashtbl.mem loaded name then
-                        Ok
-                          (Printf.sprintf
-                             "[skill %S already loaded earlier in this \
-                              run — full body remains in your conversation \
-                              history; consult it there]"
-                             name)
-                      else begin
-                        Hashtbl.add loaded name ();
-                        Ok s.body
-                      end
-                  | None ->
-                      let avail =
-                        match names with
-                        | [] -> "(none)"
-                        | _ -> String.concat ", " names
-                      in
-                      Error
-                        (Printf.sprintf "Unknown skill %S. Available: %s"
-                           name avail))
-              | _ -> Error "missing 'name' field")
-          | _ -> Error "input must be JSON object");
-    }
+  Types.make_typed_tool ~name:load_skill_tool_name
+    ~description:
+      "Load a skill's full body into the conversation. Use this when the \
+       current task falls into the skill's domain (see the skill index in \
+       the system prompt). Don't pre-load skills speculatively — only \
+       when you're about to act in that domain. The body stays in context \
+       for the rest of the task. (Subsequent calls in the same run \
+       return a short stub — the original body is already in your \
+       conversation history.)"
+    ~idempotent:true ~timeout_sec:(Some 1.0) ~category:"meta"
+    ~input_schema:
+      (`Assoc
+        [
+          ("type", `String "object");
+          ( "properties",
+            `Assoc
+              [
+                ( "name",
+                  `Assoc
+                    [
+                      ("type", `String "string");
+                      ( "description",
+                        `String
+                          "Exact skill name from the index (e.g. \
+                           \"react-testing\")" );
+                    ] );
+              ] );
+          ("required", `List [ `String "name" ]);
+        ])
+    ~input_decoder:(fun json ->
+      Json_decode.with_object_input json
+        (Json_decode.get_string_field "name"))
+    ~handler:(fun name ->
+      match Hashtbl.find_opt table name with
+      | Some s ->
+          if Hashtbl.mem loaded name then
+            Ok
+              (Printf.sprintf
+                 "[skill %S already loaded earlier in this run — full body \
+                  remains in your conversation history; consult it there]"
+                 name)
+          else begin
+            Hashtbl.add loaded name ();
+            Ok s.body
+          end
+      | None ->
+          let avail =
+            match names with [] -> "(none)" | _ -> String.concat ", " names
+          in
+          Error (Printf.sprintf "Unknown skill %S. Available: %s" name avail))
+    ()
 
 (** Build the body of the skill index block. Returns RAW body without
     any [<available_skills>] tag — the caller (typically

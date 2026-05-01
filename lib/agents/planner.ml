@@ -121,23 +121,16 @@ let extract_plan_input (response : llm_response) : Yojson.Safe.t option =
 let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
   match input with
   | `Assoc fields ->
-      let title =
-        match List.assoc_opt "title" fields with
-        | Some (`String s) -> s
-        | _ -> "(untitled)"
-      in
-      let tasks_json = List.assoc_opt "tasks" fields in
-      (match tasks_json with
+      let title = Json_decode.get_string_field_or "title" ~default:"(untitled)" fields in
+      (match List.assoc_opt "tasks" fields with
       | Some (`List items) ->
           let tasks =
             List.mapi
               (fun i j ->
                 let description =
                   match j with
-                  | `Assoc fs -> (
-                      match List.assoc_opt "description" fs with
-                      | Some (`String s) -> s
-                      | _ -> "")
+                  | `Assoc fs ->
+                      Json_decode.get_string_field_or "description" ~default:"" fs
                   | _ -> ""
                 in
                 { index = i + 1; description })
@@ -368,48 +361,37 @@ let extract_recovery_input (response : llm_response) : Yojson.Safe.t option =
     response.content
 
 let parse_tasks_field fs =
-  let task_items =
-    match List.assoc_opt "tasks" fs with
-    | Some (`List items) -> items
-    | _ -> []
-  in
-  List.mapi
-    (fun i j ->
-      let description =
-        match j with
-        | `Assoc tfs -> (
-            match List.assoc_opt "description" tfs with
-            | Some (`String s) -> s
-            | _ -> "")
-        | _ -> ""
-      in
-      { index = i + 1; description })
-    task_items
+  Json_decode.get_list_field_or_empty "tasks" fs
+  |> List.mapi (fun i j ->
+         let description =
+           match j with
+           | `Assoc tfs ->
+               Json_decode.get_string_field_or "description" ~default:"" tfs
+           | _ -> ""
+         in
+         { index = i + 1; description })
   |> List.filter (fun t -> t.description <> "")
 
 let parse_recovery_decision (input : Yojson.Safe.t) :
     (recovery_decision, agent_error) Result.t =
-  match input with
-  | `Assoc fs -> (
-      match List.assoc_opt "decision" fs with
-      | Some (`String "abandon") -> Ok Abandon
-      | Some (`String "skip") -> Ok Skip
-      | Some (`String "replan") ->
-          let new_tasks = parse_tasks_field fs in
-          if new_tasks = [] then
-            Error (Plan_invalid "replan with empty tasks list")
-          else Ok (Replan new_tasks)
-      | Some (`String "split") ->
-          let new_tasks = parse_tasks_field fs in
-          if new_tasks = [] then
-            Error (Plan_invalid "split with empty tasks list")
-          else Ok (Split new_tasks)
-      | Some (`String other) ->
-          Error
-            (Plan_invalid
-               (Printf.sprintf "unknown recovery decision %S" other))
-      | _ -> Error (Plan_invalid "submit_recovery missing decision"))
-  | _ -> Error (Plan_invalid "submit_recovery input is not an object")
+  let open Json_decode in
+  let with_tasks ctor name fs =
+    let new_tasks = parse_tasks_field fs in
+    if new_tasks = [] then
+      Error (Printf.sprintf "%s with empty tasks list" name)
+    else Ok (ctor new_tasks)
+  in
+  let decode fs =
+    let* decision = get_string_field "decision" fs in
+    match decision with
+    | "abandon" -> Ok Abandon
+    | "skip" -> Ok Skip
+    | "replan" -> with_tasks (fun ts -> Replan ts) "replan" fs
+    | "split" -> with_tasks (fun ts -> Split ts) "split" fs
+    | other -> Error (Printf.sprintf "unknown recovery decision %S" other)
+  in
+  Result.map_error (fun msg -> Plan_invalid msg)
+    (with_object_input input decode)
 
 (** ReAct-style recovery. Like [plan], allows the recovery planner to
     [load_skill] / [view_file] / [bash 'cat ...'] to inspect the actual

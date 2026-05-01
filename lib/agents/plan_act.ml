@@ -99,20 +99,11 @@ let submit_task_result_tool : tool_def =
 let parse_task_submit (input : Yojson.Safe.t) : task_submit =
   match input with
   | `Assoc fs ->
-      let bool_field name default =
-        match List.assoc_opt name fs with
-        | Some (`Bool b) -> b
-        | _ -> default
-      in
-      let str_field name default =
-        match List.assoc_opt name fs with
-        | Some (`String s) -> s
-        | _ -> default
-      in
+      let open Json_decode in
       {
-        ts_success = bool_field "success" true;
-        ts_result = str_field "result" "";
-        ts_error = str_field "error" "";
+        ts_success = get_bool_field_or "success" ~default:true fs;
+        ts_result = get_string_field_or "result" ~default:"" fs;
+        ts_error = get_string_field_or "error" ~default:"" fs;
       }
   | _ ->
       { ts_success = false; ts_result = ""; ts_error = "non-object input" }

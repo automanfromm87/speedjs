@@ -5,6 +5,7 @@
     errors back to the LLM with [is_error: true] so the model can recover. *)
 
 open Types
+open Json_decode
 
 (* ===== helpers ===== *)
 
@@ -26,23 +27,6 @@ let truncate_string ~max s =
     String.sub s 0 max
     ^ Printf.sprintf "\n[... truncated %d chars ...]" (String.length s - max)
   else s
-
-let get_string_field name fields =
-  match List.assoc_opt name fields with
-  | Some (`String s) -> Ok s
-  | Some _ -> Error (Printf.sprintf "field '%s' must be a string" name)
-  | None -> Error (Printf.sprintf "missing required field '%s'" name)
-
-let get_int_field name fields =
-  match List.assoc_opt name fields with
-  | Some (`Int n) -> Ok n
-  | Some _ -> Error (Printf.sprintf "field '%s' must be an integer" name)
-  | None -> Error (Printf.sprintf "missing required field '%s'" name)
-
-let with_object_input input k =
-  match input with
-  | `Assoc fields -> k fields
-  | _ -> Error "input must be a JSON object"
 
 (** All file-touching tools require absolute paths. A relative path
     resolves against the OCaml process CWD which is almost never what the
@@ -284,7 +268,6 @@ let bash : tool_def =
         ])
     ~input_decoder:(fun json ->
       with_object_input json (fun fs ->
-          let ( let* ) = Result.bind in
           let* command = get_string_field "command" fs in
           let* exec_dir = get_string_field "exec_dir" fs in
           let* exec_dir = require_absolute_path ~field:"exec_dir" exec_dir in
@@ -340,7 +323,6 @@ let view_file : tool_def =
         ])
     ~input_decoder:(fun json ->
       with_object_input json (fun fs ->
-          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let view_range =
@@ -429,7 +411,6 @@ let write_file : tool_def =
         ])
     ~input_decoder:(fun json ->
       with_object_input json (fun fs ->
-          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let* content = get_string_field "content" fs in
@@ -498,7 +479,6 @@ let str_replace : tool_def =
         ])
     ~input_decoder:(fun json ->
       with_object_input json (fun fs ->
-          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let* old_str = get_string_field "old_str" fs in
