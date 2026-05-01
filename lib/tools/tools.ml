@@ -132,8 +132,6 @@ let run_with_timeout ~timeout_sec ~cmd =
 
 (* ===== calculator: bc ===== *)
 
-type calculator_input = { expression : string }
-
 let calculator : tool_def =
   make_typed_tool ~name:"calculator"
     ~description:
@@ -158,13 +156,9 @@ let calculator : tool_def =
           ("required", `List [ `String "expression" ]);
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
-          let* expression = get_string_field "expression" fs in
-          Ok { expression }
-      | _ -> Error "input must be a JSON object")
-    ~handler:(fun { expression } ->
+      with_object_input json (fun fs ->
+          get_string_field "expression" fs))
+    ~handler:(fun expression ->
       let safe =
         String.for_all
           (fun c ->
@@ -182,15 +176,6 @@ let calculator : tool_def =
         in
         Result.map String.trim (read_all_from_proc cmd))
     ()
-
-(* ===== http_get: curl =====
-
-   Showcases [make_typed_tool]: input_decoder owns the JSON-to-record
-   translation in one place; handler operates on a strongly-typed
-   record. No more inline [with_object_input] / [get_string_field]
-   ladder buried in the handler. *)
-
-type http_get_input = { url : string }
 
 let http_get : tool_def =
   make_typed_tool ~name:"http_get"
@@ -216,17 +201,11 @@ let http_get : tool_def =
           ("required", `List [ `String "url" ]);
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
-          let* url = get_string_field "url" fs in
-          Ok { url }
-      | _ -> Error "input must be a JSON object")
-    ~handler:(fun { url } ->
-      (* --compressed: ask for gzip/deflate/zstd and decompress transparently.
-         Without this many sites (python.org, cloudflare-fronted, etc.)
-         return binary garbage that breaks the next LLM call (invalid
-         UTF-8 in tool_result content). *)
+      with_object_input json (fun fs -> get_string_field "url" fs))
+    ~handler:(fun url ->
+      (* --compressed: ask for gzip/deflate/zstd. Without this many sites
+         (python.org, cloudflare-fronted, etc.) return binary garbage
+         that breaks the next LLM call (invalid UTF-8 in tool_result). *)
       let cmd =
         Printf.sprintf
           "curl -sL --compressed --max-time 15 -A 'speedjs/0.1' %s 2>&1"
@@ -304,26 +283,21 @@ let bash : tool_def =
           ("required", `List [ `String "command"; `String "exec_dir" ]);
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
+      with_object_input json (fun fs ->
+          let ( let* ) = Result.bind in
           let* command = get_string_field "command" fs in
           let* exec_dir = get_string_field "exec_dir" fs in
           let* exec_dir = require_absolute_path ~field:"exec_dir" exec_dir in
-          Ok { command; exec_dir }
-      | _ -> Error "input must be a JSON object")
+          Ok { command; exec_dir }))
     ~handler:(fun { command; exec_dir } ->
-      if not (Sys.file_exists exec_dir) then
-        Error (Printf.sprintf "exec_dir does not exist: %s" exec_dir)
-      else if not (Sys.is_directory exec_dir) then
-        Error (Printf.sprintf "exec_dir is not a directory: %s" exec_dir)
-      else
-        (* [cd "$dir" && (...)] rather than [chdir] so subshells invoked
-           by the user command inherit the dir too. *)
-        let wrapped =
-          Printf.sprintf "cd %s && (%s)" (Filename.quote exec_dir) command
-        in
-        run_with_timeout ~timeout_sec:30 ~cmd:wrapped)
+      (* [cd "$dir" && (...)] rather than [chdir] so subshells invoked by
+         the user command inherit the dir too. The shell surfaces a clear
+         error if exec_dir is missing or not a directory — no need to
+         pre-check (TOCTOU). *)
+      let wrapped =
+        Printf.sprintf "cd %s && (%s)" (Filename.quote exec_dir) command
+      in
+      run_with_timeout ~timeout_sec:30 ~cmd:wrapped)
     ()
 
 (* ===== view_file ===== *)
@@ -365,9 +339,8 @@ let view_file : tool_def =
           ("required", `List [ `String "path" ]);
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
+      with_object_input json (fun fs ->
+          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let view_range =
@@ -375,54 +348,50 @@ let view_file : tool_def =
             | Some (`List [ `Int s; `Int e ]) -> Some (s, e)
             | _ -> None
           in
-          Ok { path; view_range }
-      | _ -> Error "input must be a JSON object")
+          Ok { path; view_range }))
     ~handler:(fun { path; view_range } ->
-      if not (Sys.file_exists path) then
-        Error (Printf.sprintf "path not found: %s" path)
-      else if Sys.is_directory path then
-        try
-          let entries = Sys.readdir path |> Array.to_list in
-          let entries = List.sort compare entries in
-          Ok
-            (Printf.sprintf "Directory: %s\n%s" path
-               (String.concat "\n" (List.map (fun e -> "  " ^ e) entries)))
-        with e ->
-          Error
-            (Printf.sprintf "readdir failed: %s" (Printexc.to_string e))
-      else
-        try
-          let ic = open_in path in
-          let lines = ref [] in
-          (try
-             while true do
-               lines := input_line ic :: !lines
-             done
-           with End_of_file -> ());
-          close_in ic;
-          let lines = List.rev !lines in
-          let total = List.length lines in
-          let start_line, end_line =
-            match view_range with
-            | Some (s, e) -> (s, e)
-            | None -> (1, total)
-          in
-          let start_line = max 1 start_line in
-          let end_line = min total end_line in
-          let numbered =
-            List.mapi
-              (fun i ln ->
-                let n = i + 1 in
-                if n >= start_line && n <= end_line then
-                  Some (Printf.sprintf "%5d\t%s" n ln)
-                else None)
-              lines
-            |> List.filter_map (fun x -> x)
-          in
-          let body = String.concat "\n" numbered in
-          Ok (truncate_string ~max:8000 body)
-        with e ->
-          Error (Printf.sprintf "read failed: %s" (Printexc.to_string e)))
+      (* Operate directly; let exceptions surface ENOENT / EISDIR /
+         ENOTDIR rather than pre-stat'ing (TOCTOU + extra syscall). *)
+      let read_dir () =
+        let entries = Sys.readdir path |> Array.to_list |> List.sort compare in
+        Printf.sprintf "Directory: %s\n%s" path
+          (String.concat "\n" (List.map (fun e -> "  " ^ e) entries))
+      in
+      let read_file () =
+        let ic = open_in path in
+        Fun.protect
+          ~finally:(fun () -> close_in_noerr ic)
+          (fun () ->
+            let lines = ref [] in
+            (try
+               while true do
+                 lines := input_line ic :: !lines
+               done
+             with End_of_file -> ());
+            let lines = List.rev !lines in
+            let total = List.length lines in
+            let s, e =
+              match view_range with
+              | Some r -> r
+              | None -> (1, total)
+            in
+            let s = max 1 s and e = min total e in
+            lines
+            |> List.mapi (fun i ln ->
+                   let n = i + 1 in
+                   if n >= s && n <= e then
+                     Some (Printf.sprintf "%5d\t%s" n ln)
+                   else None)
+            |> List.filter_map Fun.id
+            |> String.concat "\n"
+            |> truncate_string ~max:8000)
+      in
+      try
+        if Sys.is_directory path then Ok (read_dir ())
+        else Ok (read_file ())
+      with
+      | Sys_error msg -> Error msg
+      | e -> Error (Printexc.to_string e))
     ()
 
 (* ===== write_file ===== *)
@@ -459,14 +428,12 @@ let write_file : tool_def =
           ("required", `List [ `String "path"; `String "content" ]);
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
+      with_object_input json (fun fs ->
+          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let* content = get_string_field "content" fs in
-          Ok { path; content }
-      | _ -> Error "input must be a JSON object")
+          Ok { path; content }))
     ~handler:(fun { path; content } ->
       try
         (* Auto-create the parent dir; saves the LLM 2 iterations every
@@ -530,15 +497,13 @@ let str_replace : tool_def =
           );
         ])
     ~input_decoder:(fun json ->
-      let ( let* ) = Result.bind in
-      match json with
-      | `Assoc fs ->
+      with_object_input json (fun fs ->
+          let ( let* ) = Result.bind in
           let* path = get_string_field "path" fs in
           let* path = require_absolute_path ~field:"path" path in
           let* old_str = get_string_field "old_str" fs in
           let* new_str = get_string_field "new_str" fs in
-          Ok { path; old_str; new_str }
-      | _ -> Error "input must be a JSON object")
+          Ok { path; old_str; new_str }))
     ~handler:(fun { path; old_str; new_str } ->
       try
         let ic = open_in path in

@@ -1,9 +1,4 @@
-(** Runtime composition — the speedjs library's "press play" entry point.
-
-    [install] wires the full effect-handler stack (Governor + Llm_handler
-    + Tool_handler + Log_handler + optional Checkpoint tape) around a
-    user-supplied thunk. The CLI's [bin/setup.ml] is now a thin
-    [Args.t -> Runtime.config] mapping that delegates here. *)
+(** Wire the effect-handler stack and run a thunk inside it. *)
 
 open Types
 

@@ -1,15 +1,5 @@
-(** Runtime composition — the speedjs library's "press play" entry point.
-
-    Given a [config] and a list of tools, [install] wires together the
-    full effect-handler stack (Governor + Llm_handler + Tool_handler +
-    Log_handler + optional Checkpoint tape) and runs the supplied thunk
-    inside it.
-
-    This module exists so library users (e.g. someone building a vertical
-    agent app on top of speedjs without wanting to write their own
-    Setup.ml) can spin up the same runtime as the [speedjs] CLI with one
-    function call. The CLI's [bin/setup.ml] is now a thin Args.t →
-    Runtime.config mapping that delegates here. *)
+(** Wire the effect-handler stack (Governor + Llm/Tool/Log chains +
+    optional Checkpoint tape) and run a thunk inside it. *)
 
 open Types
 
@@ -71,17 +61,6 @@ let build_log_chain ~config : Log_handler.t =
 
 (* ===== install ===== *)
 
-(** Compose the runtime as a stack of effect handlers and run [thunk]:
-
-    OUTERMOST       Governor (global limits + death-loop detection)
-                    Log_handler
-                    Tool_handler / Llm_handler chains
-                    + Checkpoint tape (when [tape_path] is set)
-    INNERMOST       thunk
-
-    The Governor sees [Tick] events emitted by the LLM chain
-    [with_governor_ticks] middleware and by [Tool_handler.install]
-    bookends, plus [Subagent_entered/Exited] from [Sub_agent.delegate]. *)
 let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
   let llm_chain = build_llm_chain ~config in
   let tool_chain = build_tool_chain ~config in

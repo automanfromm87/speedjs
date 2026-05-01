@@ -1,10 +1,5 @@
-(** JSON ↔ Types serialization, factored out of [Types] to keep the
-    type-definition file a small navigable index. The functions here
-    deal exclusively with the Anthropic Messages API wire shape.
-
-    Errors during decoding raise [Failure] — callers (e.g.
-    [Anthropic_req.parse_response]) wrap into typed errors at their
-    own boundary. *)
+(** JSON ↔ Types serialization for the Anthropic Messages wire shape.
+    Decoders raise [Failure]; callers wrap at their boundary. *)
 
 open Types
 
