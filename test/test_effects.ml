@@ -158,21 +158,34 @@ let test_sandbox_vectors_pinned () =
   in
   assert empty_path;
 
-  (* KNOWN-OPEN: dot-dot path traversal isn't normalized. The naive
-     prefix check accepts "/proj/../etc/passwd" because it starts with
-     "/proj/" — the inner FS still says "no such file" but the
-     sandbox-level error message ("escapes sandbox") is NOT what comes
-     back. Pinned here so future canonicalization shows in the diff. *)
-  let dotdot_known_open =
+  (* Path traversal: normalize_path resolves [..] before the prefix
+     check, so /proj/../etc/passwd → /etc/passwd → rejected. *)
+  let dotdot_defended =
     match attempt_read root "/proj/../etc/passwd" with
-    | Error msg -> not (Test_helpers.contains msg "escapes sandbox")
-    | Ok _ -> true
+    | Error msg -> Test_helpers.contains msg "escapes sandbox"
+    | Ok _ -> false
   in
-  assert dotdot_known_open;
+  assert dotdot_defended;
+
+  (* Sibling traversal that resolves to under-root must still pass:
+     /proj/sub/../safe.txt → /proj/safe.txt → allowed. *)
+  let lateral_kept_inside =
+    let files = Hashtbl.create 4 in
+    Hashtbl.add files "/proj/safe.txt" "ok";
+    let chain =
+      File_handler.in_memory ~files |> File_handler.with_sandbox ~root
+    in
+    let r = ref (Ok "") in
+    File_handler.install chain (fun () ->
+        r := Effect.perform (Effects.File_read "/proj/sub/../safe.txt"));
+    match !r with Ok "ok" -> true | _ -> false
+  in
+  assert lateral_kept_inside;
 
   print_endline
-    "✓ Sandbox vectors: blocks /etc, /proj-evil, relative, empty; \
-     KNOWN-OPEN: /proj/../etc/passwd (no path normalization)"
+    "✓ Sandbox vectors: blocks /etc, /proj-evil, relative, empty, \
+     /proj/../etc/passwd; allows /proj/sub/../safe.txt (resolves under \
+     root)"
 
 let test_with_sandbox_rejects_outside_root () =
   let files = Hashtbl.create 4 in

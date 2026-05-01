@@ -70,9 +70,12 @@ exception Governor_aborted of {
   reason : string;
 }
 
-(** Install the Governor effect handler around [thunk]. *)
+(** Install the Governor effect handler around [thunk]. [clock]
+    defaults to [Unix.gettimeofday]; tests inject a mutable-ref clock
+    to drive walltime checks deterministically. *)
 val install :
   ?limits:Limits.t ->
+  ?clock:(unit -> float) ->
   cost:cost_state ->
   ?on_tick:(Event.t -> unit) ->
   (unit -> 'a) ->

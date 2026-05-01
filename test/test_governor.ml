@@ -228,6 +228,27 @@ let test_governor_aborts_on_cost_via_full_chain () =
   print_endline
     "✓ Governor aborts mid-run when cost crosses max_cost_usd (full chain)"
 
+let test_governor_aborts_on_walltime_via_virtual_clock () =
+  (* Inject a ref-backed clock to drive walltime deterministically.
+     start_time captures clock() at install (=0.0); we advance the ref
+     past the cap then trigger another Tick. *)
+  let clock = ref 0.0 in
+  let now () = !clock in
+  let cost = new_cost_state () in
+  let limits = { Governor.Limits.none with max_wall_time_sec = Some 1.0 } in
+  (try
+     Governor.install ~limits ~clock:now ~cost (fun () ->
+         Effect.perform
+           (Governor.Tick (Llm_started { messages = 0; tools = 0 }));
+         clock := 5.0;
+         Effect.perform
+           (Governor.Tick (Llm_started { messages = 0; tools = 0 })));
+     failwith "expected Governor_aborted"
+   with Governor.Governor_aborted { limit; _ } ->
+     assert (limit = "max_wall_time"));
+  print_endline
+    "✓ Governor aborts on max_wall_time via injected virtual clock"
+
 let test_governor_aborts_on_death_loop_via_full_chain () =
   (* LLM keeps emitting the SAME tool_use with identical input. The
      Governor's input-digest counter trips after [max_repeated_tool_calls]
@@ -282,4 +303,5 @@ let run () =
   test_recovery_prompt_includes_prior_failures_and_cycle ();
   test_recovery_parser_handles_all_four_decisions ();
   test_governor_aborts_on_cost_via_full_chain ();
+  test_governor_aborts_on_walltime_via_virtual_clock ();
   test_governor_aborts_on_death_loop_via_full_chain ()

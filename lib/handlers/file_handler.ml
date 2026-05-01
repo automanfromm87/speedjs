@@ -120,30 +120,59 @@ let in_memory ~files : t =
 
 (* ===== middleware ===== *)
 
-(** [with_sandbox ~root inner]: refuse any path that doesn't lie under
-    [root]. The inner handler is only called for paths that pass.
+(* Resolve [.] / [..] segments without touching disk. Strictly
+   textual — does NOT follow symlinks; for symlink-aware sandboxing
+   on real disk you want a syscall-based realpath at a higher layer.
+   Empty / relative paths are returned as-is so the prefix check
+   below rejects them. *)
+let normalize_path path =
+  if path = "" || path.[0] <> '/' then path
+  else
+    let parts = String.split_on_char '/' path in
+    let rec walk acc = function
+      | [] -> List.rev acc
+      | "" :: rest | "." :: rest -> walk acc rest
+      | ".." :: rest -> (
+          match acc with
+          | [] -> walk [] rest (* attempt to go above root: clamp at / *)
+          | _ :: t -> walk t rest)
+      | seg :: rest -> walk (seg :: acc) rest
+    in
+    "/" ^ String.concat "/" (walk [] parts)
 
-    [root] should be canonical (no trailing slash, no [.] / [..]); we
-    don't normalize it here — sandbox is only as strict as its root. *)
+(** [with_sandbox ~root inner]: refuse any path that doesn't lie under
+    [root]. Paths are normalized (resolves [.] / [..]) before the
+    prefix check AND before being passed to the inner handler, so
+    [/proj/../etc/passwd] is rejected and [/proj/sub/../a.txt] reaches
+    the inner as [/proj/a.txt].
+
+    [root] should be canonical (no trailing slash, no [.] / [..]). *)
 let with_sandbox ~root (inner : t) : t =
-  let in_root path =
+  let in_root norm =
     let rl = String.length root in
-    String.length path >= rl
-    && String.sub path 0 rl = root
-    && (String.length path = rl || path.[rl] = '/')
+    String.length norm >= rl
+    && String.sub norm 0 rl = root
+    && (String.length norm = rl || norm.[rl] = '/')
   in
   let reject path =
     Error (Printf.sprintf "path %S escapes sandbox root %S" path root)
   in
+  let guard f path =
+    let norm = normalize_path path in
+    if in_root norm then f norm else reject path
+  in
   {
-    read = (fun path -> if in_root path then inner.read path else reject path);
+    read = guard inner.read;
     write =
       (fun ~path ~content ->
-        if in_root path then inner.write ~path ~content else reject path);
-    list_dir =
+        let norm = normalize_path path in
+        if in_root norm then inner.write ~path:norm ~content
+        else reject path);
+    list_dir = guard inner.list_dir;
+    stat =
       (fun path ->
-        if in_root path then inner.list_dir path else reject path);
-    stat = (fun path -> if in_root path then inner.stat path else `Missing);
+        let norm = normalize_path path in
+        if in_root norm then inner.stat norm else `Missing);
   }
 
 type op = [ `Read | `Write | `List | `Stat ]

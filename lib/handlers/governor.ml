@@ -134,16 +134,18 @@ type state = {
   mutable tool_calls : int;
   mutable subagent_depth : int;
   start_time : float;
+  clock : unit -> float;
   cost : cost_state;
   recent_tool_sigs : string Queue.t;
 }
 
-let make_state ~cost =
+let make_state ~cost ~clock =
   {
     steps = 0;
     tool_calls = 0;
     subagent_depth = 0;
-    start_time = Unix.gettimeofday ();
+    start_time = clock ();
+    clock;
     cost;
     recent_tool_sigs = Queue.create ();
   }
@@ -163,7 +165,7 @@ let check_steps state limits =
 let check_wall_time state limits =
   match limits.Limits.max_wall_time_sec with
   | Some m ->
-      let elapsed = Unix.gettimeofday () -. state.start_time in
+      let elapsed = state.clock () -. state.start_time in
       if elapsed > m then
         abort ~limit:"max_wall_time"
           ~reason:
@@ -263,8 +265,9 @@ let observe state limits event =
     [Governor_aborted] when a cap is crossed.
 
     [on_tick] is an optional spy hook (e.g. for telemetry / tests). *)
-let install ?(limits = Limits.default) ~cost ?(on_tick = ignore) f =
-  let state = make_state ~cost in
+let install ?(limits = Limits.default) ?(clock = Unix.gettimeofday) ~cost
+    ?(on_tick = ignore) f =
+  let state = make_state ~cost ~clock in
   let open Effect.Deep in
   try_with f ()
     {
