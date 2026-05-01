@@ -108,6 +108,72 @@ let test_current_time_tool_uses_time_effect () =
 
 (* ===== File_handler middleware ===== *)
 
+(* ========================================================================
+   Sandbox attack-vector library — pin down what's defended vs known-open.
+   ======================================================================== *)
+
+let attempt_read root path =
+  let files = Hashtbl.create 4 in
+  Hashtbl.add files "/proj/safe.txt" "ok";
+  Hashtbl.add files "/etc/passwd" "secret";
+  let chain =
+    File_handler.in_memory ~files |> File_handler.with_sandbox ~root
+  in
+  let result = ref (Ok "") in
+  File_handler.install chain (fun () ->
+      result := Effect.perform (Effects.File_read path));
+  !result
+
+let test_sandbox_vectors_pinned () =
+  (* Pin current behavior for known attack shapes. Some are defended,
+     some explicitly NOT (and noted) — this test locks both classes
+     so future changes are visible diffs. *)
+  let root = "/proj" in
+  let allowed =
+    match attempt_read root "/proj/safe.txt" with
+    | Ok "ok" -> true
+    | _ -> false
+  in
+  assert allowed;
+
+  let outside =
+    match attempt_read root "/etc/passwd" with Error _ -> true | _ -> false
+  in
+  assert outside;
+
+  let prefix_confused =
+    match attempt_read root "/proj-evil/x" with
+    | Error _ -> true
+    | _ -> false
+  in
+  assert prefix_confused;
+
+  let relative =
+    match attempt_read root "etc/passwd" with Error _ -> true | _ -> false
+  in
+  assert relative;
+
+  let empty_path =
+    match attempt_read root "" with Error _ -> true | _ -> false
+  in
+  assert empty_path;
+
+  (* KNOWN-OPEN: dot-dot path traversal isn't normalized. The naive
+     prefix check accepts "/proj/../etc/passwd" because it starts with
+     "/proj/" — the inner FS still says "no such file" but the
+     sandbox-level error message ("escapes sandbox") is NOT what comes
+     back. Pinned here so future canonicalization shows in the diff. *)
+  let dotdot_known_open =
+    match attempt_read root "/proj/../etc/passwd" with
+    | Error msg -> not (Test_helpers.contains msg "escapes sandbox")
+    | Ok _ -> true
+  in
+  assert dotdot_known_open;
+
+  print_endline
+    "✓ Sandbox vectors: blocks /etc, /proj-evil, relative, empty; \
+     KNOWN-OPEN: /proj/../etc/passwd (no path normalization)"
+
 let test_with_sandbox_rejects_outside_root () =
   let files = Hashtbl.create 4 in
   Hashtbl.add files "/proj/a.ml" "ok";
@@ -234,6 +300,7 @@ let run () =
   test_view_file_tool_uses_file_effects ();
   test_current_time_tool_uses_time_effect ();
   test_with_sandbox_rejects_outside_root ();
+  test_sandbox_vectors_pinned ();
   test_with_audit_observes_every_op ();
   test_with_read_cache_avoids_reread ();
   test_memory_persist_through_file_effects ();

@@ -164,10 +164,122 @@ let test_recovery_parser_handles_all_four_decisions () =
     "✓ Planner.parse_recovery_decision handles replan / split / skip / \
      abandon"
 
+(* ========================================================================
+   Governor end-to-end through the full handler stack.
+
+   Verifies the limits actually fire when Governor is wired up via
+   Llm_handler.with_governor_ticks + Tool_handler tick emissions —
+   not just at the unit level (which the four tests above cover).
+   ======================================================================== *)
+
+let canned_llm responses : Llm_handler.t =
+  let pending = ref responses in
+  fun _args ->
+    match !pending with
+    | [] -> failwith "[mock-llm] ran out of canned responses"
+    | r :: rest ->
+        pending := rest;
+        r
+
+let test_governor_aborts_on_cost_via_full_chain () =
+  let cost = new_cost_state () in
+  let limits = { Governor.Limits.none with max_cost_usd = Some 0.001 } in
+  (* Each LLM response charges ~$0.0009 input + $0.00015 output ≈ $0.001+
+     so the second call trips the cap. *)
+  let expensive_resp =
+    {
+      content =
+        [
+          Tool_use
+            {
+              id = Id.Tool_use_id.of_string "u";
+              name = "noop";
+              input = `Assoc [];
+            };
+        ];
+      stop_reason = Tool_use_stop;
+      usage =
+        {
+          input_tokens = 300;
+          output_tokens = 10;
+          cache_creation_input_tokens = 0;
+          cache_read_input_tokens = 0;
+        };
+    }
+  in
+  let llm_chain =
+    canned_llm [ expensive_resp; expensive_resp; expensive_resp ]
+    |> Llm_handler.with_cost_tracking ~cost
+    |> Llm_handler.with_governor_ticks
+  in
+  let aborted = ref false in
+  (try
+     Governor.install ~limits ~cost (fun () ->
+         Llm_handler.install llm_chain (fun () ->
+             Log_handler.install Log_handler.null (fun () ->
+                 Handlers.silent (fun () ->
+                     ignore
+                       (Agent.run ~max_iterations:10
+                          ~user_query:"loop forever" ~tools:[] ())))))
+   with Governor.Governor_aborted { limit; _ } ->
+     assert (limit = "max_cost");
+     aborted := true);
+  assert !aborted;
+  print_endline
+    "✓ Governor aborts mid-run when cost crosses max_cost_usd (full chain)"
+
+let test_governor_aborts_on_death_loop_via_full_chain () =
+  (* LLM keeps emitting the SAME tool_use with identical input. The
+     Governor's input-digest counter trips after [max_repeated_tool_calls]
+     identical calls. *)
+  let cost = new_cost_state () in
+  let limits =
+    { Governor.Limits.none with max_repeated_tool_calls = Some 3 }
+  in
+  let same_call =
+    {
+      content =
+        [
+          Tool_use
+            {
+              id = Id.Tool_use_id.of_string "u";
+              name = "calculator";
+              input = `Assoc [ ("expression", `String "1+1") ];
+            };
+        ];
+      stop_reason = Tool_use_stop;
+      usage = usage_of_basic ~input_tokens:1 ~output_tokens:1;
+    }
+  in
+  let llm_chain =
+    canned_llm (List.init 20 (fun _ -> same_call))
+  in
+  let aborted = ref false in
+  (try
+     Governor.install ~limits ~cost (fun () ->
+         Llm_handler.install llm_chain (fun () ->
+             File_handler.install File_handler.direct (fun () ->
+                 Time_handler.install Time_handler.direct (fun () ->
+                     Tool_handler.install ~tools:Tools.all
+                       Tool_handler.direct (fun () ->
+                         Log_handler.install Log_handler.null (fun () ->
+                             ignore
+                               (Agent.run ~max_iterations:50
+                                  ~user_query:"loop"
+                                  ~tools:Tools.all ())))))))
+   with Governor.Governor_aborted { limit; _ } ->
+     assert (limit = "max_repeated_tool_calls");
+     aborted := true);
+  assert !aborted;
+  print_endline
+    "✓ Governor aborts mid-run on identical-input tool repetition (full chain)"
+
 let run () =
   test_governor_passes_tick_to_observer ();
   test_governor_aborts_on_max_steps ();
   test_governor_detects_death_loop ();
   test_governor_subagent_depth ();
   test_recovery_prompt_includes_prior_failures_and_cycle ();
-  test_recovery_parser_handles_all_four_decisions ()
+  test_recovery_parser_handles_all_four_decisions ();
+  test_governor_aborts_on_cost_via_full_chain ();
+  test_governor_aborts_on_death_loop_via_full_chain ()
