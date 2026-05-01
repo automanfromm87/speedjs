@@ -22,7 +22,7 @@ let () =
   let mcp_tools = Setup.load_mcp_tools args in
   let skill_index, skill_tools = Setup.load_skills args in
   let _subagent_tools, tools = Setup.build_tools ~mcp_tools ~skill_tools in
-  let system_prompt = Setup.build_system_prompt ~skill_index in
+  let system_blocks = Setup.build_system_blocks ~skill_index in
   let cost = Speedjs.Handlers.new_cost_state () in
 
   if not quiet then
@@ -32,15 +32,16 @@ let () =
   let on_log = if quiet then fun _ -> () else Log.line in
   let on_text_delta = if stream then Log.str else fun _ -> () in
   let run_with_runtime thunk =
-    Setup.make_runtime args ~tools ~model ~system_prompt ~cost ~on_log
-      ~on_text_delta thunk
+    Setup.make_runtime args ~tools ~model ~cost ~on_log ~on_text_delta thunk
   in
 
   let exit_code =
     match args.session with
     | Some path ->
-        Modes.session ~args ~path ~tools ~run_with_runtime ~quiet ~model
-    | None -> Modes.oneshot ~args ~tools ~run_with_runtime
+        Modes.session ~args ~path ~tools ~system_blocks ~run_with_runtime
+          ~quiet ~model ()
+    | None ->
+        Modes.oneshot ~args ~tools ~system_blocks ~run_with_runtime ()
   in
 
   let summary_line =

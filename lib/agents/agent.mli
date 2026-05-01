@@ -55,9 +55,16 @@ val run_loop :
   unit ->
   (string * Context.t, agent_error * Context.t) Result.t
 
-(** One-shot entry point: returns just the final answer string. *)
+(** One-shot entry point: returns just the final answer string.
+
+    [system_prompt] defaults to [default_system_prompt]. [system_blocks]
+    are extension-contributed fragments (skill index, memory summary,
+    workspace brief, ...) — each rendered as [<name>body</name>] in the
+    system prompt, in registration order, after the base. *)
 val run :
   ?max_iterations:int ->
+  ?system_prompt:string ->
+  ?system_blocks:(string * string) list ->
   user_query:string ->
   tools:tool_def list ->
   unit ->
@@ -65,9 +72,12 @@ val run :
 
 (** Multi-turn entry point: takes seed [messages] and returns an
     [agent_outcome] carrying the updated history (including any pending
-    ask_user tool_use). *)
+    ask_user tool_use). [system_prompt] / [system_blocks] same as
+    [run]. *)
 val run_session :
   ?max_iterations:int ->
+  ?system_prompt:string ->
+  ?system_blocks:(string * string) list ->
   messages:message list ->
   tools:tool_def list ->
   unit ->

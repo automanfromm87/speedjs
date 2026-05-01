@@ -20,3 +20,8 @@ type _ Effect.t +=
           parallel (production handler does this). *)
   | Log : string -> unit Effect.t
       (** Emit a log line. Handler decides where it goes. *)
+  | Event_log : Event.t -> unit Effect.t
+      (** Emit a structured [Event.t]. Observers can branch on the
+          variant. The default handler in [Log_handler] forwards a
+          rendered string via [to_log_line] so the line still lands in
+          the log sink even with no structured observer installed. *)

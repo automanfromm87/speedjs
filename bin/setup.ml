@@ -23,6 +23,9 @@ let load_mcp_tools (args : Args.t) : Speedjs.Types.tool_def list =
             with
             | Ok (conn, defs) ->
                 mcp_conns := conn :: !mcp_conns;
+                (* Pre-runtime: Log_handler isn't installed yet, so
+                   emit a plain log line. Structured [Event_log] is
+                   for code running INSIDE the agent runtime. *)
                 Log.f "[mcp] %s/%s loaded %d tools: %s" conn.server_name
                   conn.server_version (List.length defs)
                   (String.concat ", "
@@ -70,10 +73,13 @@ let build_tools ~mcp_tools ~skill_tools :
   in
   (subagent_tools, subagent_tools @ [ delegate ])
 
-(** Splice the skill index (if any) into the default system prompt. *)
-let build_system_prompt ~skill_index =
-  if skill_index = "" then Speedjs.Agent.default_system_prompt
-  else Speedjs.Agent.default_system_prompt ^ "\n\n" ^ skill_index
+(** Build the list of system-prompt blocks contributed by enabled
+    extensions. Currently just the skill index (when skills are
+    loaded). Each entry is [(name, body)] and renders as
+    [<name>body</name>] in the executor / agent's system prompt. *)
+let build_system_blocks ~skill_index =
+  if skill_index = "" then []
+  else [ ("available_skills", skill_index) ]
 
 (** Build the LLM handler chain from CLI args.
 
@@ -160,8 +166,8 @@ let build_governor_limits ~(args : Args.t) : Speedjs.Governor.Limits.t =
     The Governor sees [Tick] events emitted by the LLM and Tool chains'
     [with_governor_ticks] middleware, plus [Subagent_entered/Exited]
     from [Sub_agent.delegate]. *)
-let make_runtime (args : Args.t) ~tools ~model ~system_prompt:_ ~cost
-    ~on_log ~on_text_delta : (unit -> 'a) -> 'a =
+let make_runtime (args : Args.t) ~tools ~model ~cost ~on_log ~on_text_delta
+    : (unit -> 'a) -> 'a =
  fun thunk ->
   let llm_chain =
     build_llm_chain ~args ~model ~cost ~on_log ~on_text_delta

@@ -6,8 +6,9 @@
 
 (** Multi-turn chat session: persists conversation across invocations,
     handles the [ask_user] pause-tool by suspending the run cleanly. *)
-let session ~(args : Args.t) ~path ~tools ~run_with_runtime ~quiet
-    ~model : int =
+let session ~(args : Args.t) ~path ~tools
+    ?(system_blocks : (string * string) list = [])
+    ~run_with_runtime ~quiet ~model () : int =
   let prior =
     match Speedjs.Session.load ~path with
     | Some s ->
@@ -22,6 +23,7 @@ let session ~(args : Args.t) ~path ~tools ~run_with_runtime ~quiet
   let session_with_input = Speedjs.Session.append_input prior args.query in
   let agent_thunk () =
     Speedjs.Agent.run_session ~max_iterations:args.max_iters
+      ~system_blocks
       ~messages:session_with_input.messages ~tools ()
   in
   (* Global limits are enforced by [Governor] (installed in
@@ -60,7 +62,9 @@ let session ~(args : Args.t) ~path ~tools ~run_with_runtime ~quiet
 
 (** One-shot mode: plan-act flow when [--plan] is set, otherwise pure
     ReAct. Returns the process exit code. *)
-let oneshot ~(args : Args.t) ~tools ~run_with_runtime : int =
+let oneshot ~(args : Args.t) ~tools
+    ?(system_blocks : (string * string) list = [])
+    ~run_with_runtime () : int =
   let agent_thunk () =
     if args.plan then
       let config =
@@ -70,11 +74,13 @@ let oneshot ~(args : Args.t) ~tools ~run_with_runtime : int =
           max_iterations_per_task = args.max_iters;
           working_dir = args.working_dir;
           memory_dir = args.memory_dir;
+          executor_system_blocks = system_blocks;
         }
       in
       Speedjs.Plan_act.run ~config ~goal:args.query ~tools ()
     else
       Speedjs.Agent.run ~max_iterations:args.max_iters
+        ~system_blocks
         ~user_query:args.query ~tools ()
   in
   (* Global limits are enforced by [Governor] (installed in

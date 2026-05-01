@@ -28,4 +28,9 @@ val tee : t list -> t
 
 (* ===== Install ===== *)
 
-val install : t -> (unit -> 'a) -> 'a
+(** Install the chain as an effect handler. Catches both
+    [Effects.Log] (string lines) and [Effects.Event_log]
+    (structured events). When [?on_event] is supplied, every emitted
+    [Event.t] is routed there in addition to being rendered via
+    [Event.to_log_line] and pushed through the string chain. *)
+val install : ?on_event:(Event.t -> unit) -> t -> (unit -> 'a) -> 'a

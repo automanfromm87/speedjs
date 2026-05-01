@@ -56,9 +56,17 @@ let tee (handlers : t list) : t =
 (* ===== Install ===== *)
 
 (** Install the chain as an effect handler around [thunk]. Catches
-    [Effects.Log]. *)
-let install (chain : t) thunk =
+    [Effects.Log] (free-form strings) AND [Effects.Event_log]
+    (structured events). When [?on_event] is provided, structured
+    events are routed there in addition to being rendered via
+    [Event.to_log_line] and pushed through the string [chain] —
+    observers can keep using grep on logs while machines tap into the
+    structured stream. *)
+let install ?(on_event : (Event.t -> unit) option) (chain : t) thunk =
   let open Effect.Deep in
+  let event_observer =
+    match on_event with Some f -> f | None -> fun _ -> ()
+  in
   try_with thunk ()
     {
       effc =
@@ -68,6 +76,12 @@ let install (chain : t) thunk =
               Some
                 (fun (k : (a, _) continuation) ->
                   chain msg;
+                  continue k ())
+          | Effects.Event_log ev ->
+              Some
+                (fun (k : (a, _) continuation) ->
+                  event_observer ev;
+                  chain (Event.to_log_line ev);
                   continue k ())
           | _ -> None);
     }

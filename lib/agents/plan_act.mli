@@ -21,6 +21,8 @@ val submit_task_result_tool : tool_def
 val run_for_task :
   ?max_iterations:int ->
   ?strategy:Context.Strategy.t ->
+  ?system_prompt:string ->
+  ?system_blocks:(string * string) list ->
   ?prior_messages:message list ->
   ?env:(string * string) list ->
   task_description:string ->
@@ -42,6 +44,13 @@ type config = {
       (** Enables cross-run executor memory persistence. *)
   model : string;
   planner_system_prompt : string option;
+  executor_system_prompt : string;
+      (** Base system prompt for each per-task executor; defaults to
+          [Agent.default_system_prompt]. *)
+  executor_system_blocks : (string * string) list;
+      (** Extension-contributed system-prompt fragments (e.g. skill
+          index). Each rendered as [<name>body</name>] in registration
+          order, after the base. *)
   executor_strategy : unit -> Context.Strategy.t;
       (** Factory for the per-task executor's context strategy. The
           factory is called ONCE per [run] invocation, so stateful

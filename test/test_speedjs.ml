@@ -8,6 +8,134 @@
 open Speedjs
 open Types
 
+(* ===== Event_log routing test ===== *)
+
+let test_event_log_routes_through_observer_and_string_chain () =
+  let captured_events = ref [] in
+  let captured_lines = ref [] in
+  let on_event ev = captured_events := ev :: !captured_events in
+  let chain s = captured_lines := s :: !captured_lines in
+  Log_handler.install ~on_event chain (fun () ->
+      Effect.perform
+        (Effects.Event_log (Plan_decomposed { goal_preview = "build X"; n_tasks = 7 }));
+      Effect.perform
+        (Effects.Event_log
+           (Task_started { index = 1; total = 7; description = "init" }));
+      Effect.perform (Effects.Log "free-form line"));
+  (* Two events captured by observer, in order. *)
+  (match List.rev !captured_events with
+  | [ Event.Plan_decomposed { n_tasks = 7; _ };
+      Event.Task_started { index = 1; total = 7; _ } ] ->
+      ()
+  | _ -> failwith "observer didn't receive expected events in order");
+  (* String chain saw rendered events + the free-form line — 3 lines. *)
+  assert (List.length !captured_lines = 3);
+  print_endline
+    "✓ Log_handler.install routes Event_log to ~on_event AND renders to \
+     string chain"
+
+(* ===== Step.once unit tests =====
+   Each test pins ONE step's outcome by feeding a single canned LLM
+   response and asserting the variant Step.once returns. *)
+
+let mk_resp ?(usage = usage_of_basic ~input_tokens:1 ~output_tokens:1)
+    ~stop_reason content =
+  { content; stop_reason; usage }
+
+let mk_ctx () = Context.empty |> Context.push_user_text "Q"
+
+let test_step_returns_terminal_text_on_end_turn () =
+  let response =
+    mk_resp ~stop_reason:End_turn [ Text "the answer" ]
+  in
+  let outcome =
+    Handlers.mock ~llm_responses:[ response ] (fun () ->
+        Step.once ~ctx:(mk_ctx ()) ())
+  in
+  (match outcome with
+  | Step.Terminal_text { answer; _ } -> assert (answer = "the answer")
+  | _ -> failwith "expected Terminal_text");
+  print_endline "✓ Step.once returns Terminal_text on End_turn"
+
+let test_step_returns_continue_on_normal_tool_use () =
+  let response =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          { id = "u1"; name = "read_file"; input = `Assoc [ ("p", `String "/x") ] };
+      ]
+  in
+  let outcome =
+    Handlers.mock ~llm_responses:[ response ]
+      ~tool_results:[ ("read_file", Ok "file contents") ]
+      (fun () -> Step.once ~ctx:(mk_ctx ()) ())
+  in
+  (match outcome with
+  | Step.Continue ctx ->
+      let msgs = Conversation.to_messages (Context.conversation ctx) in
+      (* original User Q, assistant tool_use, user tool_result = 3 turns *)
+      assert (List.length msgs = 3)
+  | _ -> failwith "expected Continue");
+  print_endline "✓ Step.once returns Continue + appends tool_result on Tool_use_stop"
+
+let test_step_returns_terminal_tool_when_terminal_called () =
+  let response =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          {
+            id = "u1";
+            name = "submit_task_result";
+            input = `Assoc [ ("ok", `Bool true) ];
+          };
+      ]
+  in
+  let outcome =
+    Handlers.mock ~llm_responses:[ response ] (fun () ->
+        Step.once ~terminal_tools:[ "submit_task_result" ]
+          ~ctx:(mk_ctx ()) ())
+  in
+  (match outcome with
+  | Step.Terminal_tool { tool_name; _ } ->
+      assert (tool_name = "submit_task_result")
+  | _ -> failwith "expected Terminal_tool");
+  print_endline
+    "✓ Step.once returns Terminal_tool when terminal tool is called"
+
+let test_step_returns_wait_for_user_on_ask_user () =
+  let response =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          {
+            id = "u1";
+            name = Tools.ask_user_name;
+            input = `Assoc [ ("question", `String "what color?") ];
+          };
+      ]
+  in
+  let outcome =
+    Handlers.mock ~llm_responses:[ response ] (fun () ->
+        Step.once ~ctx:(mk_ctx ()) ())
+  in
+  (match outcome with
+  | Step.Wait_for_user { question; _ } -> assert (question = "what color?")
+  | _ -> failwith "expected Wait_for_user");
+  print_endline "✓ Step.once returns Wait_for_user on ask_user tool"
+
+let test_step_returns_failed_on_max_tokens () =
+  let response =
+    mk_resp ~stop_reason:Max_tokens [ Text "partial..." ]
+  in
+  let outcome =
+    Handlers.mock ~llm_responses:[ response ] (fun () ->
+        Step.once ~ctx:(mk_ctx ()) ())
+  in
+  (match outcome with
+  | Step.Failed { reason = Llm_max_tokens; _ } -> ()
+  | _ -> failwith "expected Failed Llm_max_tokens");
+  print_endline "✓ Step.once returns Failed on Max_tokens stop_reason"
+
 let test_simple_text_response () =
   (* LLM gives one response, just text, no tool calls. End_turn. *)
   let response =
@@ -911,6 +1039,65 @@ let test_context_renders_system_with_env () =
   assert (contains s "<current_time>");
   print_endline "✓ Context.render_system composes system + env blocks"
 
+let test_context_system_blocks_ordering () =
+  (* Ordering invariant: render = base + system_blocks (registration order)
+     + env_blocks (registration order). Critical for prompt-cache stability:
+     extensions added later don't invalidate earlier blocks. *)
+  let ctx =
+    Speedjs.Context.empty
+    |> Speedjs.Context.with_system_prompt "BASE"
+    |> Speedjs.Context.add_system_block ~name:"first_block" ~body:"FIRST"
+    |> Speedjs.Context.add_system_block ~name:"second_block" ~body:"SECOND"
+    |> Speedjs.Context.with_env ~tag:"env_block" ~body:"ENV"
+  in
+  let s = Speedjs.Context.render_system ctx in
+  let pos sub =
+    let n = String.length sub and m = String.length s in
+    let rec loop i =
+      if i + n > m then -1
+      else if String.sub s i n = sub then i
+      else loop (i + 1)
+    in
+    loop 0
+  in
+  let p_base = pos "BASE" in
+  let p_first = pos "FIRST" in
+  let p_second = pos "SECOND" in
+  let p_env = pos "ENV" in
+  assert (p_base >= 0);
+  assert (p_first > p_base);
+  assert (p_second > p_first);
+  assert (p_env > p_second);
+  print_endline
+    "✓ Context.render_system: base < system_blocks < env (registration \
+     order)"
+
+let test_context_add_tool_appends () =
+  let mk_tool name : Speedjs.Types.tool_def =
+    {
+      idempotent = true;
+      timeout_sec = None;
+      category = "test";
+      name;
+      description = "";
+      input_schema = `Assoc [ ("type", `String "object") ];
+      handler = (fun _ -> Ok "");
+    }
+  in
+  let ctx =
+    Speedjs.Context.empty
+    |> Speedjs.Context.add_tool (mk_tool "a")
+    |> Speedjs.Context.add_tools [ mk_tool "b"; mk_tool "c" ]
+    |> Speedjs.Context.add_tool (mk_tool "d")
+  in
+  let names =
+    List.map
+      (fun (t : Speedjs.Types.tool_def) -> t.name)
+      (Speedjs.Context.tools ctx)
+  in
+  assert (names = [ "a"; "b"; "c"; "d" ]);
+  print_endline "✓ Context.add_tool / add_tools preserve insertion order"
+
 let test_context_to_llm_args_carries_strategy () =
   let conv =
     Speedjs.Conversation.empty
@@ -1618,6 +1805,50 @@ let test_recovery_prompt_includes_prior_failures_and_cycle () =
       print_endline
         "✓ Planner.recover injects prior_failures + cycle_index into prompt"
 
+let test_recovery_parser_handles_all_four_decisions () =
+  let mk_input ?(tasks = []) decision =
+    let task_items =
+      `List
+        (List.map
+           (fun d -> `Assoc [ ("description", `String d) ])
+           tasks)
+    in
+    `Assoc [ ("decision", `String decision); ("tasks", task_items) ]
+  in
+  (* abandon — no tasks *)
+  (match Planner.parse_recovery_decision (mk_input "abandon") with
+  | Ok Planner.Abandon -> ()
+  | _ -> failwith "abandon failed to parse");
+  (* skip — tasks ignored *)
+  (match Planner.parse_recovery_decision (mk_input "skip") with
+  | Ok Planner.Skip -> ()
+  | _ -> failwith "skip failed to parse");
+  (* replan — needs tasks *)
+  (match
+     Planner.parse_recovery_decision
+       (mk_input ~tasks:[ "step1"; "step2" ] "replan")
+   with
+  | Ok (Planner.Replan ts) -> assert (List.length ts = 2)
+  | _ -> failwith "replan failed to parse");
+  (* split — needs tasks *)
+  (match
+     Planner.parse_recovery_decision
+       (mk_input ~tasks:[ "sub1"; "sub2"; "sub3" ] "split")
+   with
+  | Ok (Planner.Split ts) -> assert (List.length ts = 3)
+  | _ -> failwith "split failed to parse");
+  (* unknown decision *)
+  (match Planner.parse_recovery_decision (mk_input "unknown") with
+  | Error _ -> ()
+  | _ -> failwith "unknown should reject");
+  (* replan with empty tasks should reject *)
+  (match Planner.parse_recovery_decision (mk_input "replan") with
+  | Error _ -> ()
+  | _ -> failwith "empty replan should reject");
+  print_endline
+    "✓ Planner.parse_recovery_decision handles replan / split / skip / \
+     abandon"
+
 (* ===== Tool_handler chain tests ===== *)
 
 let mk_test_tool ?(idempotent = false) ?(timeout_sec = None)
@@ -1817,6 +2048,12 @@ let test_context_compacted_strategy () =
   print_endline "✓ Context.Strategy.compacted folds prefix into summary turn"
 
 let () =
+  test_event_log_routes_through_observer_and_string_chain ();
+  test_step_returns_terminal_text_on_end_turn ();
+  test_step_returns_continue_on_normal_tool_use ();
+  test_step_returns_terminal_tool_when_terminal_called ();
+  test_step_returns_wait_for_user_on_ask_user ();
+  test_step_returns_failed_on_max_tokens ();
   test_simple_text_response ();
   test_single_tool_call ();
   test_tool_error_surfaced ();
@@ -1852,6 +2089,8 @@ let () =
   test_conversation_tool_use_in_user_rejected ();
   test_conversation_round_trip_legitimate_dangling ();
   test_context_renders_system_with_env ();
+  test_context_system_blocks_ordering ();
+  test_context_add_tool_appends ();
   test_context_to_llm_args_carries_strategy ();
   test_sliding_window_at_below_trigger_passes_through ();
   test_sliding_window_at_first_trim_invariants ();
@@ -1876,6 +2115,7 @@ let () =
   test_governor_detects_death_loop ();
   test_governor_subagent_depth ();
   test_recovery_prompt_includes_prior_failures_and_cycle ();
+  test_recovery_parser_handles_all_four_decisions ();
   test_tool_handler_direct_classifies_errors ();
   test_tool_handler_validation_rejects_non_object ();
   test_tool_handler_retry_only_for_idempotent ();

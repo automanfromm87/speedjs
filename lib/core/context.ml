@@ -31,12 +31,22 @@
 open Types
 
 type env_block = { tag : string; body : string }
+type system_block = { name : string; body : string }
 
 type t = {
   system_prompt : string;
+      (** The base system prompt — what the agent / mode hardcodes. *)
+  system_blocks : system_block list;
+      (** Extension-contributed prompt fragments (skill index, memory
+          summary, workspace brief, ...). Stored in reverse insertion
+          order; [render_system] reverses before formatting. Kept
+          separate from [system_prompt] so multiple contributors can
+          add blocks without coordinating string concatenation, and
+          so the cache prefix (base + tools) stays stable across
+          extensions. *)
   env : env_block list;
-      (** Stored in reverse insertion order; [render_system] reverses
-          before formatting. *)
+      (** User-side env blocks (the "<tag>body</tag>" wrapping in the
+          system field). Stored in reverse insertion order. *)
   tools : tool_def list;
   conversation : Conversation.t;
 }
@@ -154,6 +164,7 @@ end
 let empty =
   {
     system_prompt = "";
+    system_blocks = [];
     env = [];
     tools = [];
     conversation = Conversation.empty;
@@ -161,7 +172,11 @@ let empty =
 
 let with_system_prompt s t = { t with system_prompt = s }
 let with_tools tools t = { t with tools }
+let add_tool tool t = { t with tools = t.tools @ [ tool ] }
+let add_tools tools t = { t with tools = t.tools @ tools }
 let with_env ~tag ~body t = { t with env = { tag; body } :: t.env }
+let add_system_block ~name ~body t =
+  { t with system_blocks = { name; body } :: t.system_blocks }
 let with_conversation c t = { t with conversation = c }
 
 (* ===== Inspection ===== *)
@@ -187,18 +202,30 @@ let push_user_text text t =
 
 (* ===== Materialize ===== *)
 
-(** Render the final system string: [system_prompt] followed by env
-    blocks formatted as [<tag>body</tag>]. Returns "" when both are
-    empty so callers can branch on emptiness. *)
+(** Render the final system string. Order:
+    {ol
+    {- [system_prompt] (the base — most stable, prompt-cache prefix)}
+    {- [system_blocks] in registration order (extension-contributed)}
+    {- [env] blocks in registration order (user-side dynamic state)}}
+
+    Stable ordering matters for prompt cache: changing earlier parts
+    invalidates everything after, so put the most-stable content first.
+
+    Returns "" when all three are empty so callers can branch. *)
 let render_system t =
-  let env_in_order = List.rev t.env in
+  let block_strs =
+    List.map
+      (fun { name; body } -> Printf.sprintf "<%s>\n%s\n</%s>" name body name)
+      (List.rev t.system_blocks)
+  in
   let env_strs =
     List.map
       (fun { tag; body } -> Printf.sprintf "<%s>\n%s\n</%s>" tag body tag)
-      env_in_order
+      (List.rev t.env)
   in
   let parts =
-    (if t.system_prompt = "" then [] else [ t.system_prompt ]) @ env_strs
+    (if t.system_prompt = "" then [] else [ t.system_prompt ])
+    @ block_strs @ env_strs
   in
   String.concat "\n\n" parts
 

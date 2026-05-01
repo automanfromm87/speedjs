@@ -132,6 +132,8 @@ let parse_task_submit (input : Yojson.Safe.t) : task_submit =
     for later ones, and the model "remembers" what was done). *)
 let run_for_task ?(max_iterations = Agent.default_max_iterations)
     ?(strategy = Context.Strategy.flat)
+    ?(system_prompt = Agent.default_system_prompt)
+    ?(system_blocks : (string * string) list = [])
     ?(prior_messages : message list = [])
     ?(env : (string * string) list = []) ~task_description ~tools () :
     task_run_outcome =
@@ -164,11 +166,18 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
     let base =
       Context.empty
       |> Context.with_tools tools_with_submit
+      |> Context.with_system_prompt system_prompt
       |> Context.with_conversation conv
+    in
+    let with_blocks =
+      List.fold_left
+        (fun c (name, body) ->
+          if body = "" then c else Context.add_system_block ~name ~body c)
+        base system_blocks
     in
     List.fold_left
       (fun c (tag, body) -> Context.with_env ~tag ~body c)
-      base env
+      with_blocks env
   in
   let final_messages c =
     Conversation.to_messages (Context.conversation c)
@@ -268,12 +277,14 @@ let survey_workspace ~working_dir : (string * string) list * string =
 
     [env] blocks (e.g. workspace_brief) ride at the system-prompt layer
     of the prompt cache, so they're shared across all tasks for free. *)
-let exec_one_task ~tools ~max_iterations ~strategy ~env
+let exec_one_task ~tools ~max_iterations ~strategy ~system_prompt
+    ~system_blocks ~env
     ~(prior_messages : message list) ~current_task :
     [ `Done of string * message list
     | `Failed of string * message list ] =
   match
-    run_for_task ~max_iterations ~strategy ~prior_messages ~env
+    run_for_task ~max_iterations ~strategy ~system_prompt ~system_blocks
+      ~prior_messages ~env
       ~task_description:current_task.description ~tools ()
   with
   | Task_done_explicit { submit; messages } ->
@@ -302,6 +313,13 @@ type config = {
   memory_dir : string option;
   model : string;
   planner_system_prompt : string option;
+  executor_system_prompt : string;
+      (** Base system prompt for each per-task executor. Defaults to
+          [Agent.default_system_prompt]. *)
+  executor_system_blocks : (string * string) list;
+      (** Extension-contributed prompt fragments (skill index, memory
+          summary, ...). Each rendered as [<name>body</name>] after
+          the base, in registration order. *)
   executor_strategy : unit -> Context.Strategy.t;
       (** Factory, not a [Strategy.t] value: stateful strategies (e.g.
           [sliding_window_at]) carry a per-instance [cut_at] ref that
@@ -327,6 +345,8 @@ let default_config =
     memory_dir = None;
     model = Anthropic.default_model;
     planner_system_prompt = None;
+    executor_system_prompt = Agent.default_system_prompt;
+    executor_system_blocks = [];
     executor_strategy = default_executor_strategy;
   }
 
@@ -343,6 +363,7 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
   let { skip_summarizer; max_iterations_per_task = max_iter;
         max_task_retries; max_recoveries; working_dir; memory_dir;
         model; planner_system_prompt;
+        executor_system_prompt; executor_system_blocks;
         executor_strategy = executor_strategy_factory } = config in
   (* Construct a fresh strategy ONCE per run. Sliding-window-style
      strategies are stateful (cut_at ref); the same closure must be
@@ -370,9 +391,12 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
   | Error e -> Error e
   | Ok initial_plan ->
       Effect.perform
-        (Effects.Log
-           (Printf.sprintf "[plan] %s — %d task(s)" initial_plan.title
-              (List.length initial_plan.tasks)));
+        (Effects.Event_log
+           (Plan_decomposed
+              {
+                goal_preview = initial_plan.title;
+                n_tasks = List.length initial_plan.tasks;
+              }));
       List.iter
         (fun (t : task) ->
           Effect.perform
@@ -416,11 +440,15 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                    (format_task_results summary_plan results))
             else summarize ~plan:summary_plan ~results ()
         | task :: rest ->
+            let total = List.length pending + List.length acc in
             Effect.perform
-              (Effects.Log
-                 (Printf.sprintf "[task %d/%d] %s" task.index
-                    (List.length pending + List.length acc)
-                    task.description));
+              (Effects.Event_log
+                 (Task_started
+                    {
+                      index = task.index;
+                      total;
+                      description = task.description;
+                    }));
 
             let checkpoint = Memory.checkpoint exec_mem in
 
@@ -428,23 +456,26 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
               let prior = Memory.to_messages exec_mem in
               match
                 exec_one_task ~tools ~max_iterations:max_iter
-                  ~strategy:executor_strategy ~env:exec_env
-                  ~prior_messages:prior ~current_task:task
+                  ~strategy:executor_strategy
+                  ~system_prompt:executor_system_prompt
+                  ~system_blocks:executor_system_blocks
+                  ~env:exec_env ~prior_messages:prior ~current_task:task
               with
               | `Done (answer, messages) ->
                   Memory.set exec_mem messages;
                   Memory.persist exec_mem;
+                  Effect.perform
+                    (Effects.Event_log
+                       (Task_completed
+                          { index = task.index; result_preview = answer }));
                   `Ok answer
               | `Failed (err, _) ->
                   Memory.restore exec_mem checkpoint;
-                  if n < max_task_retries then begin
-                    Effect.perform
-                      (Effects.Log
-                         (Printf.sprintf
-                            "[task %d] failed (%s) — retry %d/%d"
-                            task.index err (n + 1) max_task_retries));
-                    attempt (n + 1)
-                  end
+                  Effect.perform
+                    (Effects.Event_log
+                       (Task_failed
+                          { index = task.index; error = err; attempt = n }));
+                  if n < max_task_retries then attempt (n + 1)
                   else `Exhausted err
             in
             match attempt 0 with
@@ -457,16 +488,23 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                   ~prior_failures
       and handle_recovery ~task ~err ~rest ~acc ~recoveries ~prior_failures =
         Effect.perform
-          (Effects.Log
-             (Printf.sprintf
-                "[task %d] exhausted retries — consulting planner for recovery"
-                task.index));
+          (Effects.Event_log
+             (Recovery_invoked
+                {
+                  failed_index = task.index;
+                  failed_error = err;
+                  cycle = recoveries;
+                }));
         if recoveries >= max_recoveries then begin
           Effect.perform
-            (Effects.Log
-               (Printf.sprintf
-                  "[recovery] budget exhausted (%d/%d), abandoning"
-                  recoveries max_recoveries));
+            (Effects.Event_log
+               (Recovery_decided
+                  {
+                    decision = "BUDGET_EXHAUSTED";
+                    details =
+                      Printf.sprintf "%d/%d cycles used" recoveries
+                        max_recoveries;
+                  }));
           drive ~pending:rest
             ~acc:((task, Error err) :: acc)
             ~recoveries ~prior_failures
@@ -498,18 +536,27 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                 ~prior_failures:next_prior_failures
           | Ok Abandon ->
               Effect.perform
-                (Effects.Log
-                   "[recovery] planner chose ABANDON — surfacing failure to summarizer");
+                (Effects.Event_log
+                   (Recovery_decided
+                      {
+                        decision = "ABANDON";
+                        details = "surfacing failure to summarizer";
+                      }));
               drive ~pending:[]
                 ~acc:((task, Error err) :: acc)
                 ~recoveries:(recoveries + 1)
                 ~prior_failures:next_prior_failures
           | Ok (Replan new_tasks) ->
+              (* REPLAN replaces failed task AND all remaining pending. *)
               Effect.perform
-                (Effects.Log
-                   (Printf.sprintf
-                      "[recovery] planner chose REPLAN — %d new task(s)"
-                      (List.length new_tasks)));
+                (Effects.Event_log
+                   (Recovery_decided
+                      {
+                        decision = "REPLAN";
+                        details =
+                          Printf.sprintf "%d new task(s) replace failed + remaining"
+                            (List.length new_tasks);
+                      }));
               let renumbered =
                 List.mapi
                   (fun i (t : task) ->
@@ -517,6 +564,52 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                   new_tasks
               in
               drive ~pending:renumbered ~acc
+                ~recoveries:(recoveries + 1)
+                ~prior_failures:next_prior_failures
+          | Ok (Split new_tasks) ->
+              (* SPLIT replaces ONLY the failed task with smaller
+                 sub-tasks; remaining stays (renumbered). *)
+              Effect.perform
+                (Effects.Event_log
+                   (Recovery_decided
+                      {
+                        decision = "SPLIT";
+                        details =
+                          Printf.sprintf "failed task -> %d sub-task(s); %d remaining stay"
+                            (List.length new_tasks) (List.length rest);
+                      }));
+              let split_count = List.length new_tasks in
+              let split_renumbered =
+                List.mapi
+                  (fun i (t : task) ->
+                    { t with index = List.length acc + 1 + i })
+                  new_tasks
+              in
+              let rest_renumbered =
+                List.mapi
+                  (fun i (t : task) ->
+                    {
+                      t with
+                      index = List.length acc + 1 + split_count + i;
+                    })
+                  rest
+              in
+              drive ~pending:(split_renumbered @ rest_renumbered) ~acc
+                ~recoveries:(recoveries + 1)
+                ~prior_failures:next_prior_failures
+          | Ok Skip ->
+              (* SKIP drops the failed task and continues unchanged. *)
+              Effect.perform
+                (Effects.Event_log
+                   (Recovery_decided
+                      {
+                        decision = "SKIP";
+                        details =
+                          Printf.sprintf "%d remaining task(s) continue"
+                            (List.length rest);
+                      }));
+              drive ~pending:rest
+                ~acc:((task, Error err) :: acc)
                 ~recoveries:(recoveries + 1)
                 ~prior_failures:next_prior_failures
       in

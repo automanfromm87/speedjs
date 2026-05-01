@@ -14,18 +14,36 @@ open Types
 type t
 
 type env_block = { tag : string; body : string }
+type system_block = { name : string; body : string }
 
 (* ===== Construction ===== *)
 
 val empty : t
 
+(** Set the BASE system prompt — the most stable, prompt-cache-prefix
+    part. Extension contributions go to [system_blocks] via
+    [add_system_block] instead of being string-concatenated here. *)
 val with_system_prompt : string -> t -> t
+
 val with_tools : tool_def list -> t -> t
+
+(** Append a single tool to the existing tool list (preserves order). *)
+val add_tool : tool_def -> t -> t
+
+(** Append several tools to the existing list (preserves order). *)
+val add_tools : tool_def list -> t -> t
 
 (** Append a context block; tag is wrapped as [<tag>body</tag>] in the
     rendered system prompt. Use for ambient context like workspace
     briefs, current time, project state. *)
 val with_env : tag:string -> body:string -> t -> t
+
+(** Add an extension-contributed system-prompt fragment, wrapped as
+    [<name>body</name>]. Multiple contributors can call this in any
+    order; they're rendered in registration order, AFTER the base
+    [system_prompt] and BEFORE the [env] blocks. Stable ordering
+    preserves prompt-cache stability when extensions don't change. *)
+val add_system_block : name:string -> body:string -> t -> t
 
 val with_conversation : Conversation.t -> t -> t
 
@@ -81,8 +99,12 @@ end
 
 (* ===== Output ===== *)
 
-(** Render the final system string: [system_prompt] then env blocks
-    formatted as [<tag>...</tag>]. Returns "" when both empty. *)
+(** Render the final system string. Order:
+    {ol
+    {- base [system_prompt]}
+    {- [system_blocks] in registration order}
+    {- [env] blocks in registration order}}
+    Returns "" when all three are empty. *)
 val render_system : t -> string
 
 (** Materialize for one [Llm_complete] call. *)

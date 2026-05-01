@@ -244,38 +244,63 @@ let plan ?(system_prompt = default_system_prompt)
 
 (* ===== Plan recovery =====
 
-   When a task fails (after retries), ask the planner whether to replan or
-   abandon. The planner sees the original goal, completed tasks, the failed
-   task description + error, and remaining pending tasks. It returns either:
+   When a task fails (after retries), ask the planner what to do. The
+   planner sees the original goal, completed tasks, the failed task +
+   error, remaining pending tasks, prior recovery failures, and the
+   cycle index. It returns one of four decisions: *)
 
-   - Replan: new task list to splice in (replaces the failed task + remaining)
-   - Abandon: give up cleanly (the executor summarizes what was achieved) *)
-
-type recovery_decision = Replan of task list | Abandon
+type recovery_decision =
+  | Replan of task list
+      (** Replace the failed task AND all remaining tasks with a new
+          ordered list. Use when the original strategy is broken and
+          a different approach is needed. *)
+  | Split of task list
+      (** Replace ONLY the failed task with smaller sub-tasks. The
+          remaining tasks stay. Use when the failed task was too
+          coarse and decomposing it would unblock progress. *)
+  | Skip
+      (** Drop the failed task and continue with the remaining tasks
+          unchanged. Use when the task isn't strictly required for the
+          goal (e.g. an optional verification step). *)
+  | Abandon
+      (** Give up cleanly; the summarizer reports what was achieved. *)
 
 let recovery_system_prompt =
   {|You are a recovery planner. A task in the plan failed. You see: the \
 original goal, completed tasks, the failed task + error, remaining tasks, \
 prior recovery failures (if any), and the current cycle index. Decide ONE of:
 
-1. REPLAN: a new ordered list of tasks that route around the failure. Use \
-submit_recovery with decision="replan" and a tasks array. The new tasks \
-replace the failed task AND all remaining pending tasks.
+1. REPLAN: a new ordered list replacing the failed task AND all remaining \
+tasks. Use submit_recovery with decision="replan" and a tasks array. Pick \
+this when the original strategy is broken and a fundamentally different \
+approach is needed.
 
-2. ABANDON: the goal cannot be achieved. Use submit_recovery with \
+2. SPLIT: keep the remaining tasks as-is, but replace the failed task with \
+SMALLER sub-tasks. Use submit_recovery with decision="split" and a tasks \
+array of ONLY the replacement sub-tasks. Pick this when the task was too \
+coarse — e.g. "set up backend + frontend + tests + deploy" is one task and \
+should be 4. Don't pick this if the issue is the strategy itself.
+
+3. SKIP: drop the failed task and continue with the remaining tasks \
+unchanged. Use submit_recovery with decision="skip" and an empty tasks \
+array. Pick this when the task isn't strictly required (optional \
+verification, nice-to-have polish) and skipping doesn't break the rest.
+
+4. ABANDON: the goal can't be achieved. Use submit_recovery with \
 decision="abandon" and an empty tasks array.
 
-Be ruthless about REPLAN — only choose it if you have a CONCRETELY DIFFERENT \
-strategy. Heuristics:
+Heuristics:
 
-- If [cycle_index] > 0 and your replacement tasks would look similar to a \
-prior failed attempt, choose ABANDON. Repeating the same shape of task list \
-typically fails the same way.
-- If [cycle_index] >= [max_cycles - 1], strongly prefer ABANDON; the next \
-recovery is your last chance and the orchestrator will hard-cap further \
-replans.
+- If [cycle_index] > 0 and your replacement would look similar to a prior \
+failed attempt, prefer ABANDON. Repeating the same shape typically fails \
+the same way.
+- If [cycle_index] >= [max_cycles - 1], strongly prefer ABANDON.
 - If the failure means the goal is fundamentally blocked (missing tool, \
 broken external dep, contradictory requirement), choose ABANDON immediately.
+- Prefer SPLIT over REPLAN when the failed task was just too big — it's a \
+smaller, more conservative move.
+- Prefer SKIP when the task is genuinely optional and the rest of the plan \
+can succeed without it.
 
 Don't replan to a "similar but slightly different" task list — that's how \
 death-spirals start.|}
@@ -299,7 +324,14 @@ let submit_recovery_tool : tool_def =
                   `Assoc
                     [
                       ("type", `String "string");
-                      ("enum", `List [ `String "replan"; `String "abandon" ]);
+                      ( "enum",
+                        `List
+                          [
+                            `String "replan";
+                            `String "split";
+                            `String "skip";
+                            `String "abandon";
+                          ] );
                     ] );
                 ( "tasks",
                   `Assoc
@@ -335,36 +367,47 @@ let extract_recovery_input (response : llm_response) : Yojson.Safe.t option =
       | _ -> None)
     response.content
 
+let parse_tasks_field fs =
+  let task_items =
+    match List.assoc_opt "tasks" fs with
+    | Some (`List items) -> items
+    | _ -> []
+  in
+  List.mapi
+    (fun i j ->
+      let description =
+        match j with
+        | `Assoc tfs -> (
+            match List.assoc_opt "description" tfs with
+            | Some (`String s) -> s
+            | _ -> "")
+        | _ -> ""
+      in
+      { index = i + 1; description })
+    task_items
+  |> List.filter (fun t -> t.description <> "")
+
 let parse_recovery_decision (input : Yojson.Safe.t) :
     (recovery_decision, agent_error) Result.t =
   match input with
   | `Assoc fs -> (
       match List.assoc_opt "decision" fs with
       | Some (`String "abandon") -> Ok Abandon
-      | Some (`String "replan") -> (
-          let task_items =
-            match List.assoc_opt "tasks" fs with
-            | Some (`List items) -> items
-            | _ -> []
-          in
-          let new_tasks =
-            List.mapi
-              (fun i j ->
-                let description =
-                  match j with
-                  | `Assoc tfs -> (
-                      match List.assoc_opt "description" tfs with
-                      | Some (`String s) -> s
-                      | _ -> "")
-                  | _ -> ""
-                in
-                { index = i + 1; description })
-              task_items
-            |> List.filter (fun t -> t.description <> "")
-          in
+      | Some (`String "skip") -> Ok Skip
+      | Some (`String "replan") ->
+          let new_tasks = parse_tasks_field fs in
           if new_tasks = [] then
             Error (Plan_invalid "replan with empty tasks list")
-          else Ok (Replan new_tasks))
+          else Ok (Replan new_tasks)
+      | Some (`String "split") ->
+          let new_tasks = parse_tasks_field fs in
+          if new_tasks = [] then
+            Error (Plan_invalid "split with empty tasks list")
+          else Ok (Split new_tasks)
+      | Some (`String other) ->
+          Error
+            (Plan_invalid
+               (Printf.sprintf "unknown recovery decision %S" other))
       | _ -> Error (Plan_invalid "submit_recovery missing decision"))
   | _ -> Error (Plan_invalid "submit_recovery input is not an object")
 
