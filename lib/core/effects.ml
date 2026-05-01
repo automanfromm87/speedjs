@@ -6,6 +6,8 @@
 
 open Types
 
+type path_kind = [ `File | `Dir | `Missing ]
+
 type _ Effect.t +=
   | Llm_complete : llm_call_args -> llm_response Effect.t
       (** Call the LLM with messages + tools, optionally overriding the
@@ -25,3 +27,17 @@ type _ Effect.t +=
           variant. The default handler in [Log_handler] forwards a
           rendered string via [to_log_line] so the line still lands in
           the log sink even with no structured observer installed. *)
+  | Time_now : float Effect.t
+      (** Current Unix timestamp (seconds since epoch). Mockable for
+          deterministic tests / Checkpoint replay. *)
+  | File_read : string -> (string, string) result Effect.t
+      (** Read the entire contents of a regular file. Path must be
+          absolute (validation is the caller's job). *)
+  | File_write : { path : string; content : string }
+      -> (int, string) result Effect.t
+      (** Create-or-overwrite a regular file with [content]. Returns
+          bytes written. Production handler [mkdir -p]s the parent. *)
+  | File_list_dir : string -> (string list, string) result Effect.t
+      (** Sorted directory entries (basenames). *)
+  | File_stat : string -> path_kind Effect.t
+      (** Classify a path: file / dir / missing. Never raises. *)

@@ -73,12 +73,15 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
             (Printf.sprintf "[gov] %s" (Governor.Event.to_string ev)))
       inner
   in
+  let with_io inner =
+    Time_handler.install (fun () -> File_handler.install inner)
+  in
   match config.tape_path with
   | None ->
       governed (fun () ->
           Llm_handler.install llm_chain (fun () ->
               Tool_handler.install ~tools tool_chain (fun () ->
-                  Log_handler.install log_chain thunk)))
+                  with_io (fun () -> Log_handler.install log_chain thunk))))
   | Some path ->
       let session =
         Checkpoint.open_session ~path ~on_log:config.on_log
@@ -89,4 +92,4 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
       governed (fun () ->
           Llm_handler.install llm_with_tape (fun () ->
               Checkpoint.install_tools_with_tape session ~tools tool_chain
-                (fun () -> Log_handler.install log_chain thunk)))
+                (fun () -> with_io (fun () -> Log_handler.install log_chain thunk))))

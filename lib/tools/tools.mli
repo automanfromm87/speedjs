@@ -9,7 +9,6 @@ open Types
 (* ===== Path / directory helpers (used by builtin tools and Plan_act) ===== *)
 
 val require_absolute_path : field:string -> string -> (string, string) result
-val ensure_dir : string -> unit
 
 (* ===== Built-in tools ===== *)
 

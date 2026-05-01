@@ -42,13 +42,6 @@ let require_absolute_path ~field path =
          field path)
   else Ok path
 
-(** Idempotent [mkdir -p]. Used by tools that auto-create parent
-    directories on write. *)
-let ensure_dir dir =
-  if dir <> "" && dir <> "." && dir <> "/" && not (Sys.file_exists dir) then
-    ignore
-      (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dir)))
-
 (** Process management with timeout. Kills child after [timeout_sec]. *)
 let run_with_timeout ~timeout_sec ~cmd =
   let stdin_r, _stdin_w = Unix.pipe () in
@@ -209,7 +202,7 @@ let current_time : tool_def =
       (`Assoc [ ("type", `String "object"); ("properties", `Assoc []) ])
     ~input_decoder:(fun _ -> Ok ())
     ~handler:(fun () ->
-      let t = Unix.gettimeofday () in
+      let t = Effect.perform Effects.Time_now in
       let tm = Unix.localtime t in
       Ok
         (Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d"
@@ -332,48 +325,30 @@ let view_file : tool_def =
           in
           Ok { path; view_range }))
     ~handler:(fun { path; view_range } ->
-      (* Operate directly; let exceptions surface ENOENT / EISDIR /
-         ENOTDIR rather than pre-stat'ing (TOCTOU + extra syscall). *)
-      let read_dir () =
-        let entries = Sys.readdir path |> Array.to_list |> List.sort compare in
+      let format_dir entries =
         Printf.sprintf "Directory: %s\n%s" path
           (String.concat "\n" (List.map (fun e -> "  " ^ e) entries))
       in
-      let read_file () =
-        let ic = open_in path in
-        Fun.protect
-          ~finally:(fun () -> close_in_noerr ic)
-          (fun () ->
-            let lines = ref [] in
-            (try
-               while true do
-                 lines := input_line ic :: !lines
-               done
-             with End_of_file -> ());
-            let lines = List.rev !lines in
-            let total = List.length lines in
-            let s, e =
-              match view_range with
-              | Some r -> r
-              | None -> (1, total)
-            in
-            let s = max 1 s and e = min total e in
-            lines
-            |> List.mapi (fun i ln ->
-                   let n = i + 1 in
-                   if n >= s && n <= e then
-                     Some (Printf.sprintf "%5d\t%s" n ln)
-                   else None)
-            |> List.filter_map Fun.id
-            |> String.concat "\n"
-            |> truncate_string ~max:8000)
+      let format_file content =
+        let lines = String.split_on_char '\n' content in
+        let total = List.length lines in
+        let s, e = Option.value view_range ~default:(1, total) in
+        let s = max 1 s and e = min total e in
+        lines
+        |> List.mapi (fun i ln ->
+               let n = i + 1 in
+               if n >= s && n <= e then Some (Printf.sprintf "%5d\t%s" n ln)
+               else None)
+        |> List.filter_map Fun.id
+        |> String.concat "\n"
+        |> truncate_string ~max:8000
       in
-      try
-        if Sys.is_directory path then Ok (read_dir ())
-        else Ok (read_file ())
-      with
-      | Sys_error msg -> Error msg
-      | e -> Error (Printexc.to_string e))
+      match Effect.perform (Effects.File_stat path) with
+      | `Missing -> Error (Printf.sprintf "no such file or directory: %s" path)
+      | `Dir ->
+          Result.map format_dir (Effect.perform (Effects.File_list_dir path))
+      | `File ->
+          Result.map format_file (Effect.perform (Effects.File_read path)))
     ()
 
 (* ===== write_file ===== *)
@@ -416,17 +391,8 @@ let write_file : tool_def =
           let* content = get_string_field "content" fs in
           Ok { path; content }))
     ~handler:(fun { path; content } ->
-      try
-        (* Auto-create the parent dir; saves the LLM 2 iterations every
-           time it writes to a fresh subdir. *)
-        ensure_dir (Filename.dirname path);
-        let oc = open_out path in
-        output_string oc content;
-        close_out oc;
-        Ok
-          (Printf.sprintf "wrote %d bytes to %s" (String.length content) path)
-      with e ->
-        Error (Printf.sprintf "write failed: %s" (Printexc.to_string e)))
+      Effect.perform (Effects.File_write { path; content })
+      |> Result.map (fun n -> Printf.sprintf "wrote %d bytes to %s" n path))
     ()
 
 (* ===== str_replace: edit a file by exact string substitution ===== *)
@@ -485,52 +451,37 @@ let str_replace : tool_def =
           let* new_str = get_string_field "new_str" fs in
           Ok { path; old_str; new_str }))
     ~handler:(fun { path; old_str; new_str } ->
-      try
-        let ic = open_in path in
-        let n = in_channel_length ic in
-        let content = really_input_string ic n in
-        close_in ic;
-        (* Find all occurrences using naive substring search. *)
-        let find_all needle hay =
-          let n = String.length needle in
-          let h = String.length hay in
-          if n = 0 then []
-          else
-            let rec loop i acc =
-              if i + n > h then List.rev acc
-              else if String.sub hay i n = needle then
-                loop (i + n) (i :: acc)
-              else loop (i + 1) acc
-            in
-            loop 0 []
-        in
-        let occurrences = find_all old_str content in
-        match occurrences with
-        | [] -> Error (Printf.sprintf "old_str not found in %s" path)
-        | _ :: _ :: _ ->
-            Error
-              (Printf.sprintf
-                 "old_str matches %d times in %s — must be unique"
-                 (List.length occurrences) path)
-        | [ idx ] ->
-            let before = String.sub content 0 idx in
-            let after_start = idx + String.length old_str in
-            let after =
-              String.sub content after_start
-                (String.length content - after_start)
-            in
-            let new_content = before ^ new_str ^ after in
-            let oc = open_out path in
-            output_string oc new_content;
-            close_out oc;
-            Ok
-              (Printf.sprintf
-                 "replaced 1 occurrence in %s (%d → %d bytes)" path n
-                 (String.length new_content))
-      with e ->
-        Error
-          (Printf.sprintf "str_replace failed: %s"
-             (Printexc.to_string e)))
+      let find_all needle hay =
+        let n = String.length needle in
+        let h = String.length hay in
+        if n = 0 then []
+        else
+          let rec loop i acc =
+            if i + n > h then List.rev acc
+            else if String.sub hay i n = needle then loop (i + n) (i :: acc)
+            else loop (i + 1) acc
+          in
+          loop 0 []
+      in
+      let* content = Effect.perform (Effects.File_read path) in
+      let original_len = String.length content in
+      match find_all old_str content with
+      | [] -> Error (Printf.sprintf "old_str not found in %s" path)
+      | _ :: _ :: _ as occs ->
+          Error
+            (Printf.sprintf "old_str matches %d times in %s — must be unique"
+               (List.length occs) path)
+      | [ idx ] ->
+          let before = String.sub content 0 idx in
+          let after_start = idx + String.length old_str in
+          let after =
+            String.sub content after_start (original_len - after_start)
+          in
+          let new_content = before ^ new_str ^ after in
+          let* n = Effect.perform (Effects.File_write { path; content = new_content }) in
+          Ok
+            (Printf.sprintf "replaced 1 occurrence in %s (%d → %d bytes)" path
+               original_len n))
     ()
 
 (* ===== ask_user: pause-tool =====
