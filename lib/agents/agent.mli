@@ -61,6 +61,34 @@ val run :
   unit ->
   agent_result
 
+(** Run a ReAct loop until [terminal_tool_name] is called and return
+    its parsed JSON input. Used by orchestrators (planner, recovery,
+    plan_act executor) that need a structured submit payload, not a
+    free-form text answer. The terminal tool's [handler] is never
+    invoked — the loop intercepts via [terminal_tools] and raises
+    [Task_terminal_called].
+
+    Outcomes:
+    - terminal tool called → [Ok input]
+    - End_turn / Max_iterations / Failed without terminal call →
+      [Error agent_error] (typically [Plan_invalid])
+    - [Wait_for_user] propagates as the [Wait_for_user] exception.
+
+    Replaces ad-hoc copies of this loop in [Planner.plan] /
+    [Planner.recover] / [Plan_act.run_for_task] — they all do the
+    same shape: build a one-shot conversation, run a ReAct loop,
+    catch a specific tool's submission. *)
+val run_until_terminal_tool :
+  ?max_iterations:int ->
+  ?system_prompt:string ->
+  ?system_blocks:(string * string) list ->
+  ?name:string ->
+  terminal_tool_name:string ->
+  user_query:string ->
+  tools:tool_def list ->
+  unit ->
+  (Yojson.Safe.t, agent_error) Result.t
+
 (** Multi-turn entry point: takes seed [messages] and returns an
     [session_result] carrying the updated history (including any pending
     ask_user tool_use). [system_prompt] / [system_blocks] same as

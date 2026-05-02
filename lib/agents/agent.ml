@@ -127,6 +127,40 @@ let run ?max_iterations ?system_prompt ?system_blocks ~user_query ~tools
   | Ok (answer, _) -> Ok answer
   | Error (e, _) -> Error e
 
+(** Run a ReAct loop until a specific terminal tool is called and
+    return its parsed JSON input. The terminal tool's [handler] is
+    never invoked — the loop intercepts via [terminal_tools] and
+    raises [Task_terminal_called]. Used by orchestrators (planner,
+    recovery, plan_act executor) that need a structured submit
+    payload, not a free-form text answer.
+
+    Outcomes:
+    - terminal tool called → [Ok input]
+    - End_turn / Max_iterations / Failed without terminal call →
+      [Error agent_error]
+    - [Wait_for_user] propagates as the [Wait_for_user] exception
+      (caller decides how to suspend / resume). *)
+let run_until_terminal_tool ?(max_iterations = default_max_iterations)
+    ?(system_prompt = default_system_prompt)
+    ?(system_blocks : (string * string) list = [])
+    ?(name = "agent") ~terminal_tool_name ~user_query ~tools () :
+    (Yojson.Safe.t, agent_error) Result.t =
+  let ctx = make_ctx ~system_prompt ~system_blocks ~user_query ~tools () in
+  try
+    match
+      run_loop ~max_iterations ~terminal_tools:[ terminal_tool_name ]
+        ~name ~ctx ()
+    with
+    | Ok (_text, _ctx) ->
+        Error
+          (Plan_invalid
+             (Printf.sprintf
+                "%s ended turn without calling %s — model lost the \
+                 protocol"
+                name terminal_tool_name))
+    | Error (e, _) -> Error e
+  with Task_terminal_called { input; _ } -> Ok input
+
 (** Multi-turn entry point. Seeds with [messages], runs the loop, and
     returns an [session_result] carrying the updated history (including
     any pending ask_user tool_use). *)

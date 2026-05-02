@@ -112,13 +112,6 @@ let submit_plan_tool : tool_def =
     handler = (fun _ -> Ok "(submit_plan handled by planner orchestrator)");
   }
 
-(** Extract the [submit_plan] tool_use input from an LLM response. *)
-let extract_plan_input (response : llm_response) : Yojson.Safe.t option =
-  List.find_map
-    (function
-      | Tool_use { name = "submit_plan"; input; _ } -> Some input | _ -> None)
-    response.content
-
 (** Parse the [submit_plan] input JSON into a [plan]. Errors propagate as
     [Plan_invalid] via the agent_result. *)
 let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
@@ -194,71 +187,20 @@ let plan ?(system_prompt = default_system_prompt)
      not in the surface presented to the model. *)
   let research_tools = tools_for_mode Planner research_tools in
   let planner_tools = research_tools @ [ submit_plan_tool ] in
-  let initial_messages =
-    [
-      {
-        role = User;
-        content =
-          [
-            Text
-              (Printf.sprintf
-                 "Goal:\n\n%s\n\nFirst, load any relevant skills from the \
-                  available_skills index. Then call submit_plan with the \
-                  structured task list."
-                 goal);
-          ];
-      };
-    ]
+  let user_query =
+    Printf.sprintf
+      "Goal:\n\n%s\n\nFirst, load any relevant skills from the \
+       available_skills index. Then call submit_plan with the \
+       structured task list."
+      goal
   in
-
-  (* Planner-specific ReAct loop. Tool_choice = Tc_auto lets the model pick
-     freely between research tools and submit_plan. We terminate by raising
-     [Agent.Task_terminal_called] when submit_plan is called. *)
-  let rec loop messages iter =
-    if iter > max_iterations then
-      Error
-        (Plan_invalid
-           (Printf.sprintf "planner exceeded %d iterations without calling submit_plan"
-              max_iterations))
-    else
-      let args : llm_call_args =
-        {
-          messages;
-          tools = planner_tools;
-          system_override = Some system_prompt;
-          tool_choice = Tc_auto;
-        }
-      in
-      Effect.perform
-        (Effects.Log (Printf.sprintf "[planner] iter %d" iter));
-      let response = Effect.perform (Effects.Llm_complete args) in
-      match response.stop_reason with
-      | End_turn ->
-          Error
-            (Plan_invalid
-               "planner ended turn without calling submit_plan — \
-                model lost the protocol")
-      | Tool_use_stop -> (
-          (* Check submit_plan terminal first. *)
-          match extract_plan_input response with
-          | Some input -> parse_plan ~goal input
-          | None ->
-              (* Non-terminal tool calls — reuse the agent's dispatch. *)
-              let assistant =
-                { role = Assistant; content = response.content }
-              in
-              let tool_results = Step.dispatch_tool_uses response.content in
-              let user_turn = { role = User; content = tool_results } in
-              loop (messages @ [ assistant; user_turn ]) (iter + 1))
-      | Max_tokens ->
-          Error
-            (Plan_invalid "planner: model hit max_tokens before submitting plan")
-      | Stop_sequence | Other _ ->
-          Error
-            (Plan_invalid
-               "planner: unexpected stop reason without submit_plan")
-  in
-  loop initial_messages 1)
+  match
+    Agent.run_until_terminal_tool ~max_iterations ~system_prompt
+      ~name:"planner" ~terminal_tool_name:"submit_plan"
+      ~user_query ~tools:planner_tools ()
+  with
+  | Ok input -> parse_plan ~goal input
+  | Error e -> Error e)
 
 (* ===== Plan recovery =====
 
@@ -381,13 +323,6 @@ let submit_recovery_tool : tool_def =
     handler = (fun _ -> Ok "(submit_recovery handled by orchestrator)");
   }
 
-let extract_recovery_input (response : llm_response) : Yojson.Safe.t option =
-  List.find_map
-    (function
-      | Tool_use { name = "submit_recovery"; input; _ } -> Some input
-      | _ -> None)
-    response.content
-
 let parse_tasks_field fs =
   Json_decode.get_list_field_or_empty "tasks" fs
   |> List.mapi (fun i j ->
@@ -500,46 +435,12 @@ let recover ?(max_iterations = default_planner_max_iter)
   in
   let research_tools = tools_for_mode Recovery research_tools in
   let recovery_tools = research_tools @ [ submit_recovery_tool ] in
-  let initial_messages = [ { role = User; content = [ Text body ] } ] in
-
-  let rec loop messages iter =
-    if iter > max_iterations then
-      Error
-        (Plan_invalid
-           (Printf.sprintf
-              "recovery exceeded %d iterations without calling submit_recovery"
-              max_iterations))
-    else
-      let args : llm_call_args =
-        {
-          messages;
-          tools = recovery_tools;
-          system_override = Some recovery_system_prompt;
-          tool_choice = Tc_auto;
-        }
-      in
-      Effect.perform
-        (Effects.Log (Printf.sprintf "[recovery] iter %d" iter));
-      let response = Effect.perform (Effects.Llm_complete args) in
-      match response.stop_reason with
-      | End_turn ->
-          Error
-            (Plan_invalid
-               "recovery ended turn without submit_recovery — \
-                lost protocol")
-      | Tool_use_stop -> (
-          match extract_recovery_input response with
-          | Some input -> parse_recovery_decision input
-          | None ->
-              let assistant =
-                { role = Assistant; content = response.content }
-              in
-              let tool_results = Step.dispatch_tool_uses response.content in
-              let user_turn = { role = User; content = tool_results } in
-              loop (messages @ [ assistant; user_turn ]) (iter + 1))
-      | Max_tokens | Stop_sequence | Other _ ->
-          Error
-            (Plan_invalid
-               "recovery: unexpected stop reason without submit_recovery")
-  in
-  loop initial_messages 1)
+  match
+    Agent.run_until_terminal_tool ~max_iterations
+      ~system_prompt:recovery_system_prompt
+      ~name:(Printf.sprintf "recovery#%d" cycle_index)
+      ~terminal_tool_name:"submit_recovery"
+      ~user_query:body ~tools:recovery_tools ()
+  with
+  | Ok input -> parse_recovery_decision input
+  | Error e -> Error e)
