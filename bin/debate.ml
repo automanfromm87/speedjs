@@ -129,16 +129,42 @@ let () =
     Speedjs.Debate.make_debater_node ~name:"pl_designer"
       ~role_prompt:pl_designer_prompt ()
   in
+  let architect_prompt =
+    {|You are a senior systems architect. You've sat in on a debate \
+between a Unix-shell expert and a programming-language designer. Both \
+made valid points. Your job: NOT to declare a winner, but to produce a \
+concrete forward-looking design that takes the strongest valid points \
+from BOTH sides and makes deliberate tradeoffs where they disagreed.
+
+Be specific. Cite actual mechanisms (types, fds, escape hatches) rather \
+than abstract principles. When you make a choice, say briefly WHY (in \
+one sentence). Acknowledge what you deliberately left open. Length: \
+3-6 paragraphs in the proposal field, plus 3-6 key_decisions and \
+2-4 open_questions.|}
+  in
+  let synth_node =
+    Speedjs.Debate.make_synthesizer_node ~name:"architect"
+      ~architect_prompt ()
+  in
 
   let topology =
-    Speedjs.Debate.make_topology ~name_a:"bash_expert" ~node_a:bash_node
+    Speedjs.Debate.make_workflow ~name_a:"bash_expert" ~node_a:bash_node
       ~name_b:"pl_designer" ~node_b:pl_node
+      ~synthesizer_name:"architect" ~synthesizer_node:synth_node
   in
-  let initial = Speedjs.Debate.initial ~topic ~max_rounds:!max_rounds in
+  (* CLI exposes "max_rounds" as conversational rounds (one round = both
+     speakers). Internally Debate counts turns. *)
+  let initial =
+    Speedjs.Debate.initial ~topic ~max_turns:(!max_rounds * 2)
+  in
 
   let final =
     Speedjs.Runtime.install
-      ~tools:[ Speedjs.Debate.submit_argument_tool ]
+      ~tools:
+        [
+          Speedjs.Debate.submit_argument_tool;
+          Speedjs.Debate.submit_design_tool;
+        ]
       ~config:runtime_config
       (fun () ->
         Speedjs.Topology.install Speedjs.Topology.direct (fun () ->
@@ -146,6 +172,7 @@ let () =
   in
 
   Speedjs.Debate.print_transcript final;
+  Speedjs.Debate.print_design final;
 
   let summary =
     Printf.sprintf
