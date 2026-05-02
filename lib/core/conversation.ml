@@ -44,7 +44,13 @@ type state =
           [to_messages] is sent to the API. *)
 
 type t = {
-  messages : message list;
+  (* Reversed internally — newest message at the head — so [push_*]
+     is O(1) cons instead of O(n) [_ @ [_]]. Public API still hands
+     out oldest-first via [to_messages] (one [List.rev] at the
+     boundary). For an N-turn run this is O(N) instead of O(N²)
+     total. Mattered most for [Plan_act] executor memory which
+     accumulates messages across tasks within a single run. *)
+  messages_rev : message list;
   state : state;
 }
 
@@ -54,10 +60,10 @@ let viol msg = raise (Invariant_violated msg)
 
 (* ===== Constructors / Accessors ===== *)
 
-let empty = { messages = []; state = S_empty }
+let empty = { messages_rev = []; state = S_empty }
 
-let length t = List.length t.messages
-let to_messages t = t.messages
+let length t = List.length t.messages_rev
+let to_messages t = List.rev t.messages_rev
 let is_empty t = match t.state with S_empty -> true | _ -> false
 
 let pending_tool_use_ids t =
@@ -112,7 +118,8 @@ let push_assistant t (blocks : content_block list) : t =
     if dangling = [] then S_awaiting_user else S_has_dangling dangling
   in
   {
-    messages = t.messages @ [ { role = Assistant; content = blocks } ];
+    messages_rev =
+      { role = Assistant; content = blocks } :: t.messages_rev;
     state = new_state;
   }
 
@@ -156,7 +163,7 @@ let push_user_with_results t (blocks : content_block list) : t =
          "push_user_with_results: tool_result for unknown tool_use_ids: %s"
          (String.concat ", " (List.map Id.Tool_use_id.to_string surplus)));
   {
-    messages = t.messages @ [ { role = User; content = blocks } ];
+    messages_rev = { role = User; content = blocks } :: t.messages_rev;
     state = S_awaiting_assistant;
   }
 
@@ -179,7 +186,7 @@ let push_user t (blocks : content_block list) : t =
   if extract_tool_result_ids blocks <> [] then
     viol "push_user: stray Tool_result with no matching pending Tool_use";
   {
-    messages = t.messages @ [ { role = User; content = blocks } ];
+    messages_rev = { role = User; content = blocks } :: t.messages_rev;
     state = S_awaiting_assistant;
   }
 
@@ -221,8 +228,10 @@ let close_dangling_with_ack ?(ack = "(acknowledged)") ?(extra = []) t =
     whether to abort, repair, or surface diagnostically. *)
 let of_messages (msgs : message list) : (t, string) result =
   try
+    (* [acc] grows newest-first (cons), which is exactly the
+       internal [messages_rev] representation — no final List.rev. *)
     let rec walk acc (st : state) = function
-      | [] -> Ok { messages = List.rev acc; state = st }
+      | [] -> Ok { messages_rev = acc; state = st }
       | m :: rest -> (
           match (st, m.role) with
           | S_empty, User ->
