@@ -138,6 +138,10 @@ let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
     crash_after = args.crash_after;
     emit_governor_events_to_log = Sys.getenv_opt "SPEEDJS_QUIET" = None;
     sandbox_root = args.sandbox_root;
+    tracer =
+      (match args.trace_file with
+      | None -> Speedjs.Trace.make_noop ()
+      | Some path -> Speedjs.Trace.make_file_writer path);
   }
 
 (** Compose runtime + run thunk. Thin wrapper around

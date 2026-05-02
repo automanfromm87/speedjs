@@ -20,6 +20,9 @@ type config = {
       (** When set, layer [File_handler.with_sandbox ~root] on top of the
           production File handler so all file ops outside [root] are
           rejected with [Error]. *)
+  tracer : Trace.tracer;
+      (** Sink for structured trace frames (one per LLM call / tool
+          dispatch). Use [Trace.make_noop ()] to disable. *)
 }
 
 (** Compose the effect handler stack and run [thunk] inside it. Returns

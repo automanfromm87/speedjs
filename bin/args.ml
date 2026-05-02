@@ -66,6 +66,9 @@ type t = {
       (** When set, all File_* effects are restricted to this prefix. *)
   restart : bool;
       (** Force [Plan_act.run] to ignore plan_state.json and replan. *)
+  trace_file : string option;
+      (** When [Some path], every LLM call and tool dispatch emits one
+          NDJSON frame to [path] for offline analysis. Off by default. *)
 }
 
 let default_walltime = 1800.0
@@ -84,6 +87,8 @@ let usage () =
     "  --sandbox PATH (restrict file ops to this prefix)";
   prerr_endline
     "  --restart (ignore saved plan_state.json and replan from scratch)";
+  prerr_endline
+    "  --trace-file PATH (NDJSON frame log for every LLM call + tool dispatch)";
   prerr_endline
     "  --log-file PATH  --session PATH  --mcp \"cmd args\" (repeatable)";
   prerr_endline "  --debug-request";
@@ -122,6 +127,7 @@ let parse argv : t =
   let memory_dir = ref None in
   let sandbox_root = ref None in
   let restart = ref false in
+  let trace_file = ref None in
   let max_steps = ref None in
   let max_tool_calls = ref None in
   let max_subagent_depth = ref None in
@@ -151,6 +157,7 @@ let parse argv : t =
     | "--memory-dir" -> memory_dir := Some (arg "--memory-dir")
     | "--sandbox" -> sandbox_root := Some (arg "--sandbox")
     | "--restart" -> restart := true
+    | "--trace-file" -> trace_file := Some (arg "--trace-file")
     | "--max-steps" -> max_steps := Some (int_of_string (arg "--max-steps"))
     | "--max-tool-calls" ->
         max_tool_calls := Some (int_of_string (arg "--max-tool-calls"))
@@ -190,6 +197,7 @@ let parse argv : t =
         memory_dir = !memory_dir;
         sandbox_root = !sandbox_root;
         restart = !restart;
+        trace_file = !trace_file;
         max_steps = !max_steps;
         max_tool_calls = !max_tool_calls;
         max_subagent_depth = !max_subagent_depth;
@@ -223,5 +231,8 @@ let active_flags (args : t) : string list =
     | Some r -> Some (Printf.sprintf "sandbox(%s)" r)
     | None -> None);
     (if args.restart then Some "restart" else None);
+    (match args.trace_file with
+    | Some _ -> Some "trace"
+    | None -> None);
   ]
   |> List.filter_map Fun.id

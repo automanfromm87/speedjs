@@ -58,6 +58,10 @@ val with_validation : t -> t
 (** Update [cost_state] after each successful call. *)
 val with_cost_tracking : cost:cost_state -> t -> t
 
+(** Wrap each LLM call in a [Trace.Llm_call] span. Captures usage
+    tokens + per-call cost. Pass [Trace.make_noop ()] to silence. *)
+val with_tracing : tracer:Trace.tracer -> model:string -> t -> t
+
 (** Log a one-line summary before each call and after each completion
     (or failure). *)
 val with_logging : ?on_log:(string -> unit) -> t -> t

@@ -75,6 +75,11 @@ val with_audit :
 (** Compact one-line in/out log per call, including category. *)
 val with_logging : ?on_log:(string -> unit) -> t -> t
 
+(** Wrap each tool dispatch in a [Trace.Tool_call] span. Tool errors
+    (Result.Error) surface as [ok=false] in the frame; exceptions
+    re-raise after emitting a failed frame. *)
+val with_tracing : tracer:Trace.tracer -> t -> t
+
 (* ===== Install ===== *)
 
 (** Install the chain as an effect handler around [thunk]. Catches

@@ -82,6 +82,44 @@ let with_cost_tracking ~(cost : cost_state) (inner : t) : t =
   cost.calls <- cost.calls + 1;
   response
 
+(** Wrap each call in a [Trace] span. Captures usage tokens + per-call
+    cost into the frame; fails closed if tracer is no-op (writes
+    nothing). Must sit OUTSIDE [with_cost_tracking] so it observes the
+    same usage that gets folded into [cost_state]. *)
+let with_tracing ~(tracer : Trace.tracer) ~(model : string) (inner : t) : t =
+ fun args ->
+  let input_summary =
+    Printf.sprintf "msgs=%d tools=%d" (List.length args.messages)
+      (List.length args.tools)
+  in
+  let capture (response : llm_response) =
+    let u = response.usage in
+    let tokens : Trace.tokens =
+      {
+        input = u.input_tokens;
+        output = u.output_tokens;
+        cache_read = u.cache_read_input_tokens;
+        cache_write = u.cache_creation_input_tokens;
+      }
+    in
+    let cost_delta =
+      (float_of_int u.input_tokens *. price_input_per_m
+      +. float_of_int u.output_tokens *. price_output_per_m
+      +. float_of_int u.cache_creation_input_tokens *. price_cache_write_per_m
+      +. float_of_int u.cache_read_input_tokens *. price_cache_read_per_m)
+      /. 1_000_000.0
+    in
+    let output =
+      Printf.sprintf "stop=%s in=%d out=%d cache_r=%d cache_w=%d"
+        (Codec.stop_reason_to_string response.stop_reason)
+        u.input_tokens u.output_tokens u.cache_read_input_tokens
+        u.cache_creation_input_tokens
+    in
+    Trace.ok_capture ~output ~tokens ~cost_delta
+  in
+  Trace.with_span tracer ~kind:Trace.Llm_call ~name:model
+    ~input_summary ~capture (fun () -> inner args)
+
 (** Log before/after each call. *)
 let with_logging ?(on_log = prerr_endline) (inner : t) : t =
  fun args ->

@@ -278,6 +278,37 @@ let perform_tool_finished_ticks ~tool ~use_id ~ok ~duration =
       safe_tick (Tool_timeout { name = tool.name; duration; budget })
   | _ -> ()
 
+(** Wrap each tool dispatch in a [Trace] span. Tools have no token cost,
+    so [tokens] / [cost_delta] are zero. Output is the result body
+    (truncated by the tracer). *)
+let with_tracing ~(tracer : Trace.tracer) (inner : t) : t =
+ fun args ->
+  let input_summary =
+    let s = Yojson.Safe.to_string args.input in
+    if String.length s > 200 then String.sub s 0 200 ^ "..." else s
+  in
+  let capture (result : (string, Error.t) result) : Trace.capture_result =
+    match result with
+    | Ok content ->
+        {
+          output = content;
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = true;
+          error = None;
+        }
+    | Error err ->
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some (Error.pp err);
+        }
+  in
+  Trace.with_span tracer ~kind:Trace.Tool_call ~name:args.tool.name
+    ~input_summary ~capture (fun () -> inner args)
+
 (** Compact one-line log before/after each tool call, including the
     tool's category metadata. *)
 let with_logging ?(on_log = prerr_endline) (inner : t) : t =

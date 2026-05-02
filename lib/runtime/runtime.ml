@@ -22,6 +22,10 @@ type config = {
           ["[gov] ..."] lines you see during dev runs. Off in tests. *)
   sandbox_root : string option;
       (** Restrict File_* ops to this prefix when set. *)
+  tracer : Trace.tracer;
+      (** Trace sink — [Trace.make_noop ()] silences. Use
+          [Trace.make_file_writer path] to capture NDJSON frames for
+          every LLM call and tool dispatch. *)
 }
 
 (* ===== chain builders ===== *)
@@ -47,6 +51,9 @@ let build_llm_chain ~config : Llm_handler.t =
   |> Llm_handler.with_validation
   |> Llm_handler.with_cost_tracking ~cost:config.cost
   |> Llm_handler.with_retry ~policy ~on_retry
+  (* Trace OUTSIDE retry so one span = one logical LLM call (covers all
+     retry attempts), not one span per retry attempt. *)
+  |> Llm_handler.with_tracing ~tracer:config.tracer ~model:config.model
   |> Llm_handler.with_governor_ticks
   |> Llm_handler.with_logging ~on_log:config.on_log
 
@@ -68,6 +75,8 @@ let build_tool_chain ~config : Tool_handler.t =
   |> Tool_handler.with_validation
   |> Tool_handler.with_retry ~policy:Llm_handler.Retry_policy.default
   |> Tool_handler.with_circuit_breaker ~failure_threshold:5 ~cooldown:60.0
+  (* Trace OUTSIDE retry — one span per logical tool call. *)
+  |> Tool_handler.with_tracing ~tracer:config.tracer
   |> Tool_handler.with_logging ~on_log:config.on_log
 
 let build_log_chain ~config : Log_handler.t =
