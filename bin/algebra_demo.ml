@@ -55,6 +55,7 @@ let () =
       emit_governor_events_to_log = false;
       sandbox_root = None;
       tracer = Trace.make_noop ();
+      on_event = (fun _ -> ());
     }
   in
 

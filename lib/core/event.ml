@@ -32,6 +32,12 @@ type t =
   | Recovery_decided of { decision : string; details : string }
       (** Recovery planner produced a decision (REPLAN N tasks /
           ABANDON / etc.). *)
+  | Subagent_entered of { mode : string; n_children : int }
+      (** A delegate / parallel_delegate boundary started; [mode] is
+          ["delegate"] or ["parallel_delegate"]; [n_children] = 1 for
+          serial, N for parallel fan-out. *)
+  | Subagent_exited of { mode : string }
+      (** Matching exit. Pair-counted with [Subagent_entered]. *)
   | Skills_loaded of { count : int; names : string list }
       (** Skill discovery completed. *)
   | Mcp_loaded of {
@@ -90,6 +96,10 @@ let to_log_line (e : t) : string =
         cycle failed_error
   | Recovery_decided { decision; details } ->
       Printf.sprintf "[event] recovery_decided %s %s" decision details
+  | Subagent_entered { mode; n_children } ->
+      Printf.sprintf "[event] subagent_entered %s n=%d" mode n_children
+  | Subagent_exited { mode } ->
+      Printf.sprintf "[event] subagent_exited %s" mode
   | Skills_loaded { count; names } ->
       Printf.sprintf "[event] skills_loaded n=%d %s" count
         (String.concat "," names)

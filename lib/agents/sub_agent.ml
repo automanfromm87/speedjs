@@ -88,7 +88,12 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
                 let safe_tick ev =
                   try Effect.perform (Governor.Tick ev) with _ -> ()
                 in
+                let safe_event ev =
+                  try Effect.perform (Effects.Event_log ev) with _ -> ()
+                in
                 safe_tick Subagent_entered;
+                safe_event
+                  (Event.Subagent_entered { mode = "delegate"; n_children = 1 });
                 let capture (r : (string, agent_error) result) :
                     Trace.capture_result =
                   match r with
@@ -106,7 +111,10 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
                 in
                 let result =
                   Fun.protect
-                    ~finally:(fun () -> safe_tick Subagent_exited)
+                    ~finally:(fun () ->
+                      safe_tick Subagent_exited;
+                      safe_event
+                        (Event.Subagent_exited { mode = "delegate" }))
                     (fun () ->
                       Trace.span_current ~kind:Trace.Agent_spawn
                         ~name:"delegate" ~input_summary:task ~capture

@@ -26,6 +26,13 @@ type config = {
       (** Trace sink — [Trace.make_noop ()] silences. Use
           [Trace.make_file_writer path] to capture NDJSON frames for
           every LLM call and tool dispatch. *)
+  on_event : Event.t -> unit;
+      (** Observer for structured control-plane events
+          ([Plan_decomposed] / [Task_started] / [Recovery_decided] /
+          [Subagent_entered] / [Subagent_exited] / ...). Default
+          no-op. Pass a function here to drive a UI, telemetry
+          pipeline, or append-only journal; events still render to
+          the [on_log] sink in parallel via [Event.to_log_line]. *)
 }
 
 (* ===== chain builders ===== *)
@@ -114,7 +121,7 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
   let with_io_and_log inner =
     Time_handler.install Time_handler.direct (fun () ->
         File_handler.install file_chain (fun () ->
-            Log_handler.install log_chain inner))
+            Log_handler.install ~on_event:config.on_event log_chain inner))
   in
   match config.tape_path with
   | None ->

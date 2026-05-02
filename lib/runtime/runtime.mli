@@ -23,6 +23,9 @@ type config = {
   tracer : Trace.tracer;
       (** Sink for structured trace frames (one per LLM call / tool
           dispatch). Use [Trace.make_noop ()] to disable. *)
+  on_event : Event.t -> unit;
+      (** Observer for structured control-plane events. Default no-op
+          ([fun _ -> ()]) — set to drive UI / telemetry / journal. *)
 }
 
 (** Compose the effect handler stack and run [thunk] inside it. Returns

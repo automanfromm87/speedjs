@@ -157,6 +157,7 @@ let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
       (match args.trace_file with
       | None -> Speedjs.Trace.make_noop ()
       | Some path -> Speedjs.Trace.make_file_writer path);
+    on_event = (fun _ -> ());
   }
 
 (** Compose runtime + run thunk. Thin wrapper around

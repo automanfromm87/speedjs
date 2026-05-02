@@ -162,13 +162,21 @@ let make_delegate_tool
                     "  [parallel_delegate] spawning %d domain(s)" n));
             (* Emit one Subagent_entered tick per child BEFORE spawn so
                the parent governor's [max_subagent_depth] check fires
-               on the parent fiber (effects don't reach Domains). *)
+               on the parent fiber (effects don't reach Domains).
+               Also emit a structured Event so observers can correlate
+               fan-out events with cost / timing in the journal. *)
             let safe_tick ev =
               try Effect.perform (Governor.Tick ev) with _ -> ()
+            in
+            let safe_event ev =
+              try Effect.perform (Effects.Event_log ev) with _ -> ()
             in
             for _ = 1 to n do
               safe_tick Subagent_entered
             done;
+            safe_event
+              (Event.Subagent_entered
+                 { mode = "parallel_delegate"; n_children = n });
             let thunks =
               List.mapi
                 (fun i task () ->
@@ -199,7 +207,9 @@ let make_delegate_tool
                 ~finally:(fun () ->
                   for _ = 1 to n do
                     safe_tick Subagent_exited
-                  done)
+                  done;
+                  safe_event
+                    (Event.Subagent_exited { mode = "parallel_delegate" }))
                 (fun () -> run thunks)
             in
             let combined =
