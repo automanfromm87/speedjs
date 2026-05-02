@@ -160,20 +160,20 @@ let make_delegate_tool
               (Effects.Log
                  (Printf.sprintf
                     "  [parallel_delegate] spawning %d domain(s)" n));
-            (* Emit one Subagent_entered tick per child BEFORE spawn so
-               the parent governor's [max_subagent_depth] check fires
-               on the parent fiber (effects don't reach Domains).
-               Also emit a structured Event so observers can correlate
-               fan-out events with cost / timing in the journal. *)
+            (* [max_subagent_depth] is RECURSION depth, not concurrent
+               sibling count. A fan-out of N children at the same
+               nesting level is depth +1, not depth +N — emit ONE
+               Subagent_entered tick (and one Subagent_exited at
+               join), regardless of N. The structured Event still
+               carries [n_children] so observers can distinguish
+               serial from parallel + count fan-outs separately. *)
             let safe_tick ev =
               try Effect.perform (Governor.Tick ev) with _ -> ()
             in
             let safe_event ev =
               try Effect.perform (Effects.Event_log ev) with _ -> ()
             in
-            for _ = 1 to n do
-              safe_tick Subagent_entered
-            done;
+            safe_tick Subagent_entered;
             safe_event
               (Event.Subagent_entered
                  { mode = "parallel_delegate"; n_children = n });
@@ -205,9 +205,7 @@ let make_delegate_tool
             let answers =
               Fun.protect
                 ~finally:(fun () ->
-                  for _ = 1 to n do
-                    safe_tick Subagent_exited
-                  done;
+                  safe_tick Subagent_exited;
                   safe_event
                     (Event.Subagent_exited { mode = "parallel_delegate" }))
                 (fun () -> run thunks)

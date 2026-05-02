@@ -131,18 +131,17 @@ exception Governor_aborted of {
 
 type state = {
   mutable subagent_depth : int;
-      (** Local to this Domain. Parent emits [Subagent_entered] N
-          times before spawning N children — those increments land
-          on the parent's depth. Children's own recursive delegate
-          calls increment their own depth. Independent budgets is
-          the right semantics here: parent caps the fan-out, child
-          caps its own re-entry. *)
-  start_time : float;
+      (** Recursion depth (NOT concurrent sibling count). Parent emits
+          ONE [Subagent_entered] per delegate / parallel_delegate
+          tool call (parallel fan-out of N children is still depth
+          +1, not depth +N). Cross-Domain children's own recursive
+          delegates increment their own depth. *)
   clock : unit -> float;
   cost : cost_state;
-      (** [cost.steps] / [cost.tool_calls] / [cost.input_tokens] etc.
-          live HERE — shared across all Domains via [cost_state]'s
-          mutex — so [max_steps], [max_tool_calls], [max_cost_usd]
+      (** [cost.steps] / [cost.tool_calls] / [cost.input_tokens] /
+          [cost.start_time] all live HERE — shared across all Domains
+          via [cost_state]'s mutex — so [max_steps] /
+          [max_tool_calls] / [max_cost_usd] / [max_wall_time_sec]
           are GLOBAL caps, not per-Domain. *)
   recent_tool_sigs : string Queue.t;
       (** Death-loop detection is per-Domain too: each child's
@@ -151,9 +150,18 @@ type state = {
 }
 
 let make_state ~cost ~clock =
+  (* Anchor the wall-clock origin lazily and ONLY at the outermost
+     Governor — the first one whose [cost_state.start_time] is still
+     the sentinel 0.0. Children inherit [cost] including the now-
+     anchored start_time, so their walltime check measures age-since-
+     RUN-start rather than age-since-Domain-spawn. *)
+  if cost.start_time = 0.0 then begin
+    Mutex.lock cost.mu;
+    if cost.start_time = 0.0 then cost.start_time <- clock ();
+    Mutex.unlock cost.mu
+  end;
   {
     subagent_depth = 0;
-    start_time = clock ();
     clock;
     cost;
     recent_tool_sigs = Queue.create ();
@@ -175,7 +183,7 @@ let check_steps state limits =
 let check_wall_time state limits =
   match limits.Limits.max_wall_time_sec with
   | Some m ->
-      let elapsed = state.clock () -. state.start_time in
+      let elapsed = state.clock () -. state.cost.start_time in
       if elapsed > m then
         abort ~limit:"max_wall_time"
           ~reason:

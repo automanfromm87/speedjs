@@ -42,7 +42,14 @@ let require_absolute_path ~field path =
          field path)
   else Ok path
 
-(** Process management with timeout. Kills child after [timeout_sec]. *)
+(** Process management with timeout. Kills child after [timeout_sec].
+
+    Drains stdout AND stderr CONCURRENTLY via [Unix.select] — pipe
+    buffers are typically 64 KiB on Linux / 16 KiB on macOS, so a
+    process writing more than that to one stream blocks on its
+    [write(2)] until something reads. Reading them sequentially
+    (stdout first, then stderr) deadlocks on stderr-heavy commands
+    that fill the stderr pipe before stdout closes. *)
 let run_with_timeout ~timeout_sec ~cmd =
   let stdin_r, _stdin_w = Unix.pipe () in
   let stdout_r, stdout_w = Unix.pipe () in
@@ -57,39 +64,50 @@ let run_with_timeout ~timeout_sec ~cmd =
   Unix.close stdin_r;
   Unix.close stdout_w;
   Unix.close stderr_w;
-  (* Watchdog *)
+  let out_buf = Buffer.create 4096 in
+  let err_buf = Buffer.create 4096 in
+  let chunk = Bytes.create 4096 in
+  let stdout_open = ref true in
+  let stderr_open = ref true in
   let timed_out = ref false in
-  let start = Unix.gettimeofday () in
-  let read_some fd =
-    let buf = Buffer.create 4096 in
-    let chunk = Bytes.create 4096 in
-    let rec loop () =
-      Unix.set_nonblock fd;
-      match Unix.read fd chunk 0 (Bytes.length chunk) with
-      | 0 -> ()
-      | n ->
-          Buffer.add_subbytes buf chunk 0 n;
-          loop ()
-      | exception Unix.Unix_error ((EAGAIN | EWOULDBLOCK), _, _) ->
-          if Unix.gettimeofday () -. start > float_of_int timeout_sec then begin
-            timed_out := true;
-            (try Unix.kill pid Sys.sigkill with _ -> ())
-          end
-          else begin
-            Unix.sleepf 0.05;
-            loop ()
-          end
-    in
-    (try loop () with _ -> ());
-    Buffer.contents buf
+  let deadline =
+    Unix.gettimeofday () +. float_of_int timeout_sec
   in
-  let out = read_some stdout_r in
-  let err = read_some stderr_r in
-  Unix.close stdout_r;
-  Unix.close stderr_r;
+  let read_or_close fd buf flag =
+    match Unix.read fd chunk 0 (Bytes.length chunk) with
+    | 0 -> flag := false
+    | n -> Buffer.add_subbytes buf chunk 0 n
+    | exception Unix.Unix_error (_, _, _) -> flag := false
+  in
+  while (!stdout_open || !stderr_open) && not !timed_out do
+    let remaining = deadline -. Unix.gettimeofday () in
+    if remaining <= 0.0 then begin
+      timed_out := true;
+      (try Unix.kill pid Sys.sigkill with _ -> ())
+    end
+    else begin
+      let fds =
+        (if !stdout_open then [ stdout_r ] else [])
+        @ (if !stderr_open then [ stderr_r ] else [])
+      in
+      let ready, _, _ =
+        try Unix.select fds [] [] (min remaining 0.5)
+        with Unix.Unix_error (Unix.EINTR, _, _) -> ([], [], [])
+      in
+      if List.mem stdout_r ready then
+        read_or_close stdout_r out_buf stdout_open;
+      if List.mem stderr_r ready then
+        read_or_close stderr_r err_buf stderr_open
+    end
+  done;
+  (try Unix.close stdout_r with _ -> ());
+  (try Unix.close stderr_r with _ -> ());
   let _, status = Unix.waitpid [] pid in
-  if !timed_out then Error (Printf.sprintf "command timed out after %ds" timeout_sec)
+  if !timed_out then
+    Error (Printf.sprintf "command timed out after %ds" timeout_sec)
   else
+    let out = Buffer.contents out_buf in
+    let err = Buffer.contents err_buf in
     let combined =
       match (out, err) with
       | "", "" -> "(no output)"
@@ -546,7 +564,16 @@ let ask_user : tool_def =
     timeout_sec = None;
     category = "meta";
     capabilities = [ Pause ];
-    allowed_modes = [ Executor; Subagent ];
+    (* Executor only: [ask_user] raises [Wait_for_user] which is
+       caught by the top-level session loop. From inside a delegate
+       / parallel_delegate the exception would propagate through the
+       sub-agent's tool dispatch, past the parent's Tool_handler,
+       and surface to the top-level session — but the [tool_use_id]
+       in the exception belongs to the sub-agent's conversation, not
+       the parent's. The user's reply would land in the wrong
+       conversation and break alternation. Sub-agents can fail back
+       to the parent and let it ask the user explicitly. *)
+    allowed_modes = [ Executor ];
     classify_error = default_classify_error;
     name = ask_user_name;
     description =

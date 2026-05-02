@@ -347,6 +347,13 @@ type cost_state = {
      reads + increments these counters under [mu]. *)
   mutable steps : int;
   mutable tool_calls : int;
+  mutable start_time : float;
+      (** Wall-clock origin for [Governor.max_wall_time_sec]. Set
+          ONCE at the outermost [Runtime.install]; child Domains
+          inherit the same value via [cost_state] so their walltime
+          checks measure age-since-RUN-start, not age-since-spawn.
+          A value of [0.0] means "not yet anchored" — first
+          Governor that sees this fills it from its clock. *)
   mu : Mutex.t;
       (** Guards mutations from parallel sub-agents, which all share
           the parent's cost_state so the parent governor sees cumulative
@@ -364,6 +371,7 @@ let new_cost_state () =
     calls = 0;
     steps = 0;
     tool_calls = 0;
+    start_time = 0.0;  (* unanchored; first Governor anchors *)
     mu = Mutex.create ();
   }
 

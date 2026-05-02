@@ -145,9 +145,45 @@ let test_tool_handler_with_timeout_aborts_slow_tool () =
         (actual %.3fs)"
        elapsed)
 
+(* Regression: stderr-heavy commands must not deadlock the
+   stdout-then-stderr drain order. Pipe buffer is typically 16-64
+   KiB; we write 200 KiB to stderr, expect the command to complete
+   normally (NOT time out), and the stderr content to come through. *)
+let test_run_with_timeout_drains_stderr_concurrently () =
+  let big = 200 * 1024 in
+  let cmd =
+    Printf.sprintf
+      "yes 'X' | head -c %d 1>&2; echo done-on-stdout"
+      big
+  in
+  let start = Unix.gettimeofday () in
+  let result = Tools.run_with_timeout ~timeout_sec:5 ~cmd in
+  let elapsed = Unix.gettimeofday () -. start in
+  let contains s sub =
+    let ls = String.length s and lsub = String.length sub in
+    let rec scan i =
+      if i + lsub > ls then false
+      else if String.sub s i lsub = sub then true
+      else scan (i + 1)
+    in
+    scan 0
+  in
+  (match result with
+  | Ok body -> assert (contains body "done-on-stdout")
+  | Error msg ->
+      failwith
+        (Printf.sprintf "expected Ok with stderr drained, got: %s" msg));
+  assert (elapsed < 5.0);
+  print_endline
+    (Printf.sprintf
+       "✓ run_with_timeout drains stdout+stderr concurrently (%.3fs, no \
+        deadlock on 200KB stderr)"
+       elapsed)
+
 let run () =
   test_curl_max_time_caps_transfer ();
   test_stream_first_byte_timeout ();
   test_stream_idle_timeout ();
   test_mcp_read_timeout ();
-  test_tool_handler_with_timeout_aborts_slow_tool ()
+  test_tool_handler_with_timeout_aborts_slow_tool ();
+  test_run_with_timeout_drains_stderr_concurrently ()

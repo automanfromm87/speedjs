@@ -10,6 +10,12 @@ open Types
 
 val require_absolute_path : field:string -> string -> (string, string) result
 
+(** Run [cmd] under [/bin/sh -c], drain stdout + stderr concurrently
+    via [Unix.select], kill on timeout. Exposed primarily for
+    regression tests; [bash] is the user-facing tool that wraps it. *)
+val run_with_timeout :
+  timeout_sec:int -> cmd:string -> (string, string) result
+
 (* ===== Built-in tools ===== *)
 
 val calculator : tool_def
