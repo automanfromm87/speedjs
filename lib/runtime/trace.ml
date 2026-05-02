@@ -97,6 +97,33 @@ type tracer = {
 
 let make_noop () = { stack = []; emit = (fun _ -> ()) }
 
+(** Domain-local "current tracer" so library code (plan_act, sub_agent)
+    can emit spans without threading [tracer] through every signature.
+    Each Domain has its own slot; parallel sub-agents need [fork] to
+    get a per-Domain tracer that shares the emit sink but has its own
+    stack (so concurrent push/pop doesn't race). *)
+let current_key : tracer Domain.DLS.key =
+  Domain.DLS.new_key (fun () -> { stack = []; emit = (fun _ -> ()) })
+
+let current () = Domain.DLS.get current_key
+
+let set_current t = Domain.DLS.set current_key t
+
+let with_current ~tracer thunk =
+  let prev = current () in
+  set_current tracer;
+  Fun.protect ~finally:(fun () -> set_current prev) thunk
+
+(** Create a sibling tracer that shares [parent]'s emit sink but has
+    its own (independent) stack. Optionally seed the stack with one
+    parent_id so the first frame emitted in this tracer threads a
+    parent reference back to the originating frame in the parent
+    Domain. Use this when spawning a new Domain that should appear
+    under the call site that spawned it. *)
+let fork ?(initial_parent_id = None) ~parent () : tracer =
+  let stack = match initial_parent_id with Some id -> [ id ] | None -> [] in
+  { stack; emit = parent.emit }
+
 let make_file_writer (path : string) : tracer =
   let oc =
     open_out_gen [ Open_creat; Open_append; Open_wronly ] 0o644 path
@@ -178,3 +205,7 @@ let with_span (t : tracer) ~(kind : kind) ~(name : string)
         ~error:(Some (Printexc.to_string e)) ~output_summary:""
         ~tokens:zero_tokens ~cost_delta_usd:0.0;
       raise e
+
+(** [with_span] using the current Domain's tracer. *)
+let span_current ~kind ~name ~input_summary ~capture f =
+  with_span (current ()) ~kind ~name ~input_summary ~capture f

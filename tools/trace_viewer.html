@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>speedjs trace viewer</title>
+<style>
+  body { font: 13px/1.4 -apple-system, "SF Mono", monospace; margin: 0; background: #0d1117; color: #c9d1d9; }
+  header { padding: 10px 16px; border-bottom: 1px solid #30363d; display: flex; gap: 16px; align-items: center; }
+  header h1 { font-size: 13px; margin: 0; font-weight: normal; color: #7d8590; }
+  header input[type=file] { color: #c9d1d9; }
+  #stats { font-size: 12px; color: #7d8590; }
+  #stats .k { color: #c9d1d9; font-weight: 600; }
+  main { display: grid; grid-template-columns: 1fr 480px; height: calc(100vh - 50px); }
+  #tree { overflow: auto; padding: 8px 0; }
+  #details { border-left: 1px solid #30363d; overflow: auto; padding: 12px 16px; background: #161b22; }
+  #details h3 { font-size: 12px; color: #7d8590; text-transform: uppercase; letter-spacing: .05em; margin: 14px 0 6px; }
+  #details pre { background: #0d1117; padding: 8px; border-radius: 4px; overflow: auto; max-height: 300px; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 2px 4px 2px 0; cursor: pointer; user-select: none; white-space: nowrap; }
+  .row:hover { background: #161b22; }
+  .row.selected { background: #1f6feb33; }
+  .row .toggle { width: 12px; color: #7d8590; }
+  .row .kind { display: inline-block; width: 64px; font-size: 10px; text-transform: uppercase; padding: 1px 4px; border-radius: 3px; text-align: center; }
+  .kind.llm_call    { background: #1f6feb; color: white; }
+  .kind.tool_call   { background: #238636; color: white; }
+  .kind.plan_step   { background: #db7d2c; color: white; }
+  .kind.agent_spawn { background: #8957e5; color: white; }
+  .kind.log         { background: #484f58; color: white; }
+  .row.fail { color: #f85149; }
+  .row .name { color: #c9d1d9; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+  .row .stats { font-size: 11px; color: #7d8590; }
+  .row .bar { flex: 1; height: 6px; background: #30363d; border-radius: 2px; position: relative; min-width: 80px; max-width: 220px; }
+  .row .bar .fill { position: absolute; height: 100%; border-radius: 2px; background: #58a6ff; }
+  .kind-fill-llm_call    { background: #1f6feb; }
+  .kind-fill-tool_call   { background: #238636; }
+  .kind-fill-plan_step   { background: #db7d2c; }
+  .kind-fill-agent_spawn { background: #8957e5; }
+  .kind-fill-log         { background: #484f58; }
+  .empty { color: #7d8590; text-align: center; padding: 60px; font-style: italic; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #30363d; }
+  .badge.ok { background: #238636; color: white; }
+  .badge.fail { background: #f85149; color: white; }
+  .filter-row { display: flex; gap: 8px; padding: 6px 16px; border-bottom: 1px solid #21262d; align-items: center; }
+  .filter-row input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 3px 6px; border-radius: 3px; font: inherit; }
+  .filter-row label { font-size: 11px; color: #7d8590; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>speedjs trace viewer</h1>
+  <input type="file" id="file" accept=".ndjson,.json,.jsonl,application/x-ndjson">
+  <div id="stats"></div>
+</header>
+<div class="filter-row" id="filters" style="display:none">
+  <input type="text" id="search" placeholder="filter by name…" style="width:200px">
+  <label><input type="checkbox" id="only-fail"> only failed</label>
+  <label><input type="checkbox" id="only-llm"> only llm</label>
+  <label><input type="checkbox" id="only-tool"> only tool</label>
+  <span style="color:#7d8590;font-size:11px">click row → details on right</span>
+</div>
+<main>
+  <div id="tree"><div class="empty">drop a trace.ndjson file above to begin</div></div>
+  <div id="details"><div class="empty">no frame selected</div></div>
+</main>
+
+<script>
+"use strict";
+
+let frames = [];      // raw frames in load order
+let byId = {};        // id -> frame
+let children = {};    // parent_id -> [frame ids]
+let roots = [];       // top-level frame ids
+let minTime = 0, maxTime = 0;
+let selectedId = null;
+let expanded = new Set();   // ids that are open
+
+const $ = (s) => document.querySelector(s);
+
+// ---------------- file load ----------------
+
+$("#file").addEventListener("change", (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => loadText(reader.result);
+  reader.readAsText(f);
+});
+
+function loadText(text) {
+  frames = [];
+  byId = {};
+  children = {};
+  roots = [];
+  expanded = new Set();
+  selectedId = null;
+
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const frame = JSON.parse(t);
+      frames.push(frame);
+      byId[frame.id] = frame;
+    } catch (e) {
+      console.warn("skip malformed line:", t.slice(0, 80));
+    }
+  }
+  if (!frames.length) {
+    $("#tree").innerHTML = '<div class="empty">no frames in file</div>';
+    return;
+  }
+
+  for (const f of frames) {
+    const p = f.parent_id;
+    if (p == null) roots.push(f.id);
+    else {
+      (children[p] ||= []).push(f.id);
+    }
+  }
+
+  minTime = Math.min(...frames.map(f => f.started_at));
+  maxTime = Math.max(...frames.map(f => f.ended_at));
+
+  // Open everything by default for small traces; collapse all if huge.
+  if (frames.length <= 50) {
+    for (const f of frames) expanded.add(f.id);
+  } else {
+    for (const id of roots) expanded.add(id);
+  }
+
+  $("#filters").style.display = "flex";
+  renderStats();
+  render();
+}
+
+function renderStats() {
+  const totalMs = ((maxTime - minTime) * 1000) | 0;
+  const totalCost = frames.reduce((a, f) => a + (f.cost_delta_usd || 0), 0);
+  const fails = frames.filter(f => !f.ok).length;
+  const llm = frames.filter(f => f.kind === "llm_call").length;
+  const tool = frames.filter(f => f.kind === "tool_call").length;
+  $("#stats").innerHTML = `
+    <span class="k">${frames.length}</span> frames |
+    <span class="k">${llm}</span> llm |
+    <span class="k">${tool}</span> tool |
+    <span class="k">$${totalCost.toFixed(4)}</span> |
+    <span class="k">${(totalMs / 1000).toFixed(1)}s</span> wall
+    ${fails ? ` | <span style="color:#f85149">${fails} failed</span>` : ""}
+  `;
+}
+
+// ---------------- tree render ----------------
+
+function passesFilter(f) {
+  const search = $("#search").value.trim().toLowerCase();
+  if (search && !f.name.toLowerCase().includes(search) &&
+      !(f.input_summary || "").toLowerCase().includes(search)) {
+    return false;
+  }
+  if ($("#only-fail").checked && f.ok) return false;
+  if ($("#only-llm").checked && f.kind !== "llm_call") return false;
+  if ($("#only-tool").checked && f.kind !== "tool_call") return false;
+  return true;
+}
+
+function render() {
+  const tree = $("#tree");
+  tree.innerHTML = "";
+  if (!roots.length) {
+    tree.innerHTML = '<div class="empty">no frames</div>';
+    return;
+  }
+
+  // Sort roots by start time so chronology reads top-down.
+  const sortedRoots = [...roots].sort((a, b) =>
+    byId[a].started_at - byId[b].started_at);
+  for (const id of sortedRoots) {
+    renderNode(id, 0, tree);
+  }
+  renderDetails();
+}
+
+function renderNode(id, depth, parent) {
+  const f = byId[id];
+  if (!f) return;
+  const kids = (children[id] || []).slice()
+    .sort((a, b) => byId[a].started_at - byId[b].started_at);
+  const visible = passesFilter(f);
+  const hasVisibleChild = kids.some(k => subtreeHasMatch(k));
+  if (!visible && !hasVisibleChild) return;
+
+  const row = document.createElement("div");
+  row.className = "row" + (f.ok ? "" : " fail") +
+    (selectedId === id ? " selected" : "");
+  row.style.paddingLeft = (depth * 16 + 8) + "px";
+
+  // toggle
+  const toggle = document.createElement("span");
+  toggle.className = "toggle";
+  toggle.textContent = kids.length ? (expanded.has(id) ? "▾" : "▸") : "·";
+  toggle.onclick = (e) => {
+    e.stopPropagation();
+    if (!kids.length) return;
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+    render();
+  };
+  row.appendChild(toggle);
+
+  const kind = document.createElement("span");
+  kind.className = "kind " + f.kind;
+  kind.textContent = f.kind.replace("_call", "").replace("_step", "").replace("_spawn", "↗");
+  row.appendChild(kind);
+
+  const name = document.createElement("span");
+  name.className = "name";
+  name.textContent = f.name;
+  row.appendChild(name);
+
+  const stats = document.createElement("span");
+  stats.className = "stats";
+  const ms = (f.duration_ms || 0).toFixed(0);
+  let s = ` ${ms}ms`;
+  if (f.tokens && f.tokens.input + f.tokens.output > 0) {
+    s += ` ${f.tokens.input}↓${f.tokens.output}↑`;
+  }
+  if (f.cost_delta_usd > 0) {
+    s += ` $${f.cost_delta_usd.toFixed(4)}`;
+  }
+  if (!f.ok) s += " ✗";
+  stats.textContent = s;
+  row.appendChild(stats);
+
+  // Time bar (Gantt)
+  const bar = document.createElement("span");
+  bar.className = "bar";
+  const fill = document.createElement("span");
+  fill.className = "fill kind-fill-" + f.kind;
+  const range = maxTime - minTime || 1;
+  const left = ((f.started_at - minTime) / range) * 100;
+  const width = Math.max(((f.ended_at - f.started_at) / range) * 100, 0.5);
+  fill.style.left = left + "%";
+  fill.style.width = width + "%";
+  bar.appendChild(fill);
+  row.appendChild(bar);
+
+  row.onclick = () => {
+    selectedId = id;
+    render();
+  };
+  parent.appendChild(row);
+
+  if (expanded.has(id)) {
+    for (const k of kids) renderNode(k, depth + 1, parent);
+  }
+}
+
+function subtreeHasMatch(id) {
+  const f = byId[id];
+  if (!f) return false;
+  if (passesFilter(f)) return true;
+  return (children[id] || []).some(k => subtreeHasMatch(k));
+}
+
+function renderDetails() {
+  const d = $("#details");
+  if (!selectedId) {
+    d.innerHTML = '<div class="empty">no frame selected</div>';
+    return;
+  }
+  const f = byId[selectedId];
+  if (!f) return;
+  const okBadge = f.ok ? '<span class="badge ok">ok</span>' : '<span class="badge fail">fail</span>';
+  const cost = f.cost_delta_usd > 0 ? `$${f.cost_delta_usd.toFixed(6)}` : "—";
+  const tk = f.tokens || {};
+  d.innerHTML = `
+    <div style="margin-bottom: 8px;">
+      <span class="kind ${f.kind}">${f.kind}</span>
+      ${okBadge}
+      <span style="margin-left: 8px; color: #c9d1d9; font-weight: 600;">${escape(f.name)}</span>
+    </div>
+    <div style="color:#7d8590;font-size:11px">
+      id ${f.id.slice(0, 8)}…
+      ${f.parent_id ? ' · parent ' + f.parent_id.slice(0, 8) + '…' : ' · root'}
+    </div>
+
+    <h3>timing</h3>
+    <div>started: ${new Date(f.started_at * 1000).toISOString().split("T")[1].slice(0, -1)}</div>
+    <div>ended: &nbsp;${new Date(f.ended_at * 1000).toISOString().split("T")[1].slice(0, -1)}</div>
+    <div>duration: <span class="badge">${f.duration_ms.toFixed(1)} ms</span></div>
+
+    <h3>cost / tokens</h3>
+    <div>cost: ${cost}</div>
+    <div>tokens: input=${tk.input || 0}, output=${tk.output || 0}, cache_r=${tk.cache_read || 0}, cache_w=${tk.cache_write || 0}</div>
+
+    <h3>input summary</h3>
+    <pre>${escape(f.input_summary || "(empty)")}</pre>
+
+    <h3>output summary</h3>
+    <pre>${escape(f.output_summary || "(empty)")}</pre>
+
+    ${f.error ? `<h3>error</h3><pre style="color:#f85149">${escape(f.error)}</pre>` : ""}
+  `;
+}
+
+function escape(s) {
+  return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+// ---------------- filter listeners ----------------
+
+["search", "only-fail", "only-llm", "only-tool"].forEach(id => {
+  $("#" + id).addEventListener("input", render);
+});
+</script>
+</body>
+</html>

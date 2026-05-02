@@ -75,6 +75,18 @@ let build_tools ~mcp_tools ~skill_tools
   in
   let subagent_tools = base @ [ serial_delegate ] in
   let build_child_stack ~prefix ~child_cost thunk =
+    (* Capture the parent's current frame id BEFORE Domain.spawn — this
+       runs in the parent Domain so [Trace.current ()] still resolves to
+       the parent's tracer. The forked child tracer is then seeded with
+       it, so the child's first emitted frame parents back to the call
+       site that spawned it. Each Domain gets its own stack to avoid
+       races; emit sink is shared (Mutex-guarded inside Trace). *)
+    let initial_parent_id =
+      Speedjs.Trace.current_parent runtime_config.tracer
+    in
+    let child_tracer =
+      Speedjs.Trace.fork ~parent:runtime_config.tracer ~initial_parent_id ()
+    in
     let child_config : Speedjs.Runtime.config =
       {
         runtime_config with
@@ -85,6 +97,7 @@ let build_tools ~mcp_tools ~skill_tools
         on_text_delta = (fun _ -> ());
         tape_path = None;
         crash_after = None;
+        tracer = child_tracer;
       }
     in
     Speedjs.Runtime.install ~tools:subagent_tools ~config:child_config thunk

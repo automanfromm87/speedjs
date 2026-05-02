@@ -88,6 +88,10 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
   let llm_chain = build_llm_chain ~config in
   let tool_chain = build_tool_chain ~config in
   let log_chain = build_log_chain ~config in
+  (* Publish the tracer to this Domain's DLS so library code (plan_act,
+     sub_agent, ...) can emit spans via [Trace.span_current] without
+     threading [tracer] through every signature. Restored on return. *)
+  let thunk = fun () -> Trace.with_current ~tracer:config.tracer thunk in
   let governed inner =
     Governor.install ~limits:config.governor_limits ~cost:config.cost
       ~on_tick:(fun ev ->

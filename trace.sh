@@ -75,3 +75,7 @@ echo
 echo "→ raw trace at $TRACE_FILE — try:"
 echo "    jq -s 'group_by(.kind)' $TRACE_FILE"
 echo "    jq 'select(.ok == false)' $TRACE_FILE"
+echo
+echo "→ open the HTML viewer:"
+echo "    open $SCRIPT_DIR/tools/trace_viewer.html"
+echo "    (drop $TRACE_FILE into the file picker)"

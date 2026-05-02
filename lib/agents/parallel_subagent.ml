@@ -163,12 +163,23 @@ let make_delegate_tool
                   let prefix = Printf.sprintf "sub:%d" i in
                   let child_cost = child_costs.(i) in
                   build_child_stack ~prefix ~child_cost (fun () ->
-                      match
-                        Agent.run ~user_query:task
-                          ~tools:tools_for_subagent ()
-                      with
-                      | Ok s -> s
-                      | Error e -> "[ERROR] " ^ agent_error_pp e))
+                      let capture (s : string) : Trace.capture_result =
+                        let ok =
+                          not (String.starts_with ~prefix:"[ERROR]" s)
+                        in
+                        Trace.ok_capture ~output:s
+                          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+                        |> fun c -> { c with ok }
+                      in
+                      Trace.span_current ~kind:Trace.Agent_spawn
+                        ~name:prefix ~input_summary:task ~capture
+                        (fun () ->
+                          match
+                            Agent.run ~user_query:task
+                              ~tools:tools_for_subagent ()
+                          with
+                          | Ok s -> s
+                          | Error e -> "[ERROR] " ^ agent_error_pp e)))
                 tasks
             in
             let answers = run thunks in

@@ -41,8 +41,31 @@ val make_noop : unit -> tracer
 
 val make_file_writer : string -> tracer
 (** Append-mode NDJSON writer. One line per emitted frame. Closed at
-    [at_exit]. Mutex-protected for safe use across threads (Domains
-    install their own tracer; this guard is for incidental Thread use). *)
+    [at_exit]. Mutex-protected so Domains and threads can share the
+    same emit sink safely. *)
+
+val current : unit -> tracer
+(** The tracer currently installed in this Domain (via [with_current]).
+    Defaults to [make_noop ()] when none has been installed. *)
+
+val with_current : tracer:tracer -> (unit -> 'a) -> 'a
+(** Install [tracer] as the current tracer for this Domain for the
+    duration of the thunk. Restored on return / exception. *)
+
+val current_parent : tracer -> string option
+(** Top of [tracer]'s stack, or [None] if empty. Useful when spawning
+    a new Domain to seed its tracer with the parent frame's id via
+    [fork ~initial_parent_id]. *)
+
+val fork :
+  ?initial_parent_id:string option ->
+  parent:tracer ->
+  unit ->
+  tracer
+(** Create a sibling tracer sharing [parent]'s emit sink but with its
+    own stack. Optionally seed the stack with [initial_parent_id] so
+    the first frame in the fork has [parent_id] pointing back to the
+    originating frame in the parent Domain. *)
 
 type capture_result = {
   output : string;
@@ -71,3 +94,12 @@ val with_span :
     call stack. [capture] runs AFTER [f] returns to extract the frame's
     metrics from the result. On exception, emits a failed frame and
     re-raises. *)
+
+val span_current :
+  kind:kind ->
+  name:string ->
+  input_summary:string ->
+  capture:('a -> capture_result) ->
+  (unit -> 'a) ->
+  'a
+(** [with_span] applied to the Domain's [current ()] tracer. *)

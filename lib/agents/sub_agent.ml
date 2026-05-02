@@ -84,12 +84,30 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
                   try Effect.perform (Governor.Tick ev) with _ -> ()
                 in
                 safe_tick Subagent_entered;
+                let capture (r : (string, agent_error) result) :
+                    Trace.capture_result =
+                  match r with
+                  | Ok answer ->
+                      Trace.ok_capture ~output:answer
+                        ~tokens:Trace.zero_tokens ~cost_delta:0.0
+                  | Error e ->
+                      {
+                        output = "";
+                        tokens = Trace.zero_tokens;
+                        cost_delta = 0.0;
+                        ok = false;
+                        error = Some (agent_error_pp e);
+                      }
+                in
                 let result =
                   Fun.protect
                     ~finally:(fun () -> safe_tick Subagent_exited)
                     (fun () ->
-                      Agent.run ~user_query:task ~tools:tools_for_subagent
-                        ())
+                      Trace.span_current ~kind:Trace.Agent_spawn
+                        ~name:"delegate" ~input_summary:task ~capture
+                        (fun () ->
+                          Agent.run ~user_query:task
+                            ~tools:tools_for_subagent ()))
                 in
                 Effect.perform
                   (Effects.Log "  [sub-agent] returning to parent");

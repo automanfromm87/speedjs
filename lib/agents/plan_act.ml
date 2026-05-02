@@ -167,25 +167,61 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
   let final_messages c =
     Conversation.to_messages (Context.conversation c)
   in
-  try
-    match
-      Agent.run_loop ~max_iterations ~strategy
-        ~terminal_tools:[ submit_task_result_name ] ~ctx ()
-    with
-    | Ok (answer, ctx) ->
-        Task_done_implicit { answer; messages = final_messages ctx }
-    | Error (reason, ctx) ->
-        Task_run_failed { reason; messages = final_messages ctx }
-  with
-  | Agent.Task_terminal_called { input; ctx_so_far; _ } ->
-      Task_done_explicit
+  let capture (outcome : task_run_outcome) : Trace.capture_result =
+    match outcome with
+    | Task_done_explicit { submit; _ } ->
+        let output =
+          Printf.sprintf "explicit submit; success=%b; %s"
+            submit.ts_success
+            (if submit.ts_success then submit.ts_result
+             else "error: " ^ submit.ts_error)
+        in
         {
-          submit = parse_task_submit input;
-          messages = final_messages ctx_so_far;
+          output;
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = submit.ts_success;
+          error =
+            (if submit.ts_success then None
+             else Some submit.ts_error);
         }
-  | Agent.Wait_for_user { tool_use_id; question; ctx_so_far } ->
-      Task_run_waiting
-        { tool_use_id; question; messages = final_messages ctx_so_far }
+    | Task_done_implicit { answer; _ } ->
+        Trace.ok_capture ~output:("implicit: " ^ answer)
+          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+    | Task_run_failed { reason; _ } ->
+        let msg = agent_error_pp reason in
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some msg;
+        }
+    | Task_run_waiting { question; _ } ->
+        Trace.ok_capture ~output:("waiting on user: " ^ question)
+          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+  in
+  Trace.span_current ~kind:Trace.Plan_step ~name:"task"
+    ~input_summary:task_description ~capture (fun () ->
+      try
+        match
+          Agent.run_loop ~max_iterations ~strategy
+            ~terminal_tools:[ submit_task_result_name ] ~ctx ()
+        with
+        | Ok (answer, ctx) ->
+            Task_done_implicit { answer; messages = final_messages ctx }
+        | Error (reason, ctx) ->
+            Task_run_failed { reason; messages = final_messages ctx }
+      with
+      | Agent.Task_terminal_called { input; ctx_so_far; _ } ->
+          Task_done_explicit
+            {
+              submit = parse_task_submit input;
+              messages = final_messages ctx_so_far;
+            }
+      | Agent.Wait_for_user { tool_use_id; question; ctx_so_far } ->
+          Task_run_waiting
+            { tool_use_id; question; messages = final_messages ctx_so_far })
 
 let summarizer_system_prompt =
   {|You are a synthesizer. The user gave a goal. A plan was created and each \
