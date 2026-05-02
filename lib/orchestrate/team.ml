@@ -37,6 +37,10 @@ type qa_report = {
 
 type t = {
   goal : string;
+  working_dir : string;
+      (** Absolute path. Fullstack writes code here via write_file;
+          QA reads + runs tests here via view_file + bash. Sandboxed
+          when [Runtime.config.sandbox_root] is set to this path. *)
   spec : artifact option;
   design : artifact option;
   implementation : artifact option;
@@ -46,13 +50,12 @@ type t = {
           end of each fullstack run. *)
   max_iterations : int;
   history : (artifact * qa_report option) list;
-      (** Past (implementation, qa_report) pairs in chronological order.
-          Useful for transcript / debugging. *)
 }
 
-let initial ~goal ~max_iterations =
+let initial ~goal ~working_dir ~max_iterations =
   {
     goal;
+    working_dir;
     spec = None;
     design = None;
     implementation = None;
@@ -568,11 +571,31 @@ let make_fullstack_node ?(extra_tools = []) ~role_prompt () : t -> t =
     | None, _ ->
         Printf.sprintf
           "GOAL: %s\n\nSPEC:\n%s\n\nDESIGN:\n%s\n\n\
-           Build the INITIAL implementation (iteration %d of max %d). \
-           Output complete, runnable code via submit_implementation. \
-           [addresses_issues] should be empty on the initial pass."
-          state.goal spec_text design_text iter state.max_iterations
-    | Some prev, Some qa ->
+           WORKING DIRECTORY: %s\n\n\
+           Build the INITIAL implementation (iteration %d of max %d).\n\n\
+           Steps you MUST do — in order:\n\
+          \  1. Use the write_file tool to create each source file under \
+           %s/. Always pass absolute paths.\n\
+          \  2. Use the bash tool (with exec_dir set to %s) to install \
+           dependencies and run tests / build commands appropriate for \
+           the stack you chose. The agent expects you to actually verify \
+           the code compiles and tests pass — DO NOT skip this.\n\
+          \  3. If tests fail or the build breaks, debug by viewing the \
+           files and editing them with write_file. Iterate until tests \
+           pass.\n\
+          \  4. ONLY THEN call submit_implementation with:\n\
+          \     • code: a SHORT description of the project layout (file \
+           list + 1 line on each). NOT the full source dump — the \
+           source is on disk now.\n\
+          \     • deployment_notes: 1-2 lines on the run command + key \
+           commands you used to verify.\n\
+          \     • addresses_issues: [] (this is the initial pass).\n\n\
+           Pick a realistic stack (Node+TS+Express, Python+FastAPI, \
+           Go+net/http, etc). Write real validation, real error \
+           handling, and at least one passing test."
+          state.goal spec_text design_text state.working_dir iter
+          state.max_iterations state.working_dir state.working_dir
+    | Some _, Some qa ->
         let issues_text =
           if qa.issues = [] then "(no specific issues, but pass=false)"
           else
@@ -590,21 +613,34 @@ let make_fullstack_node ?(extra_tools = []) ~role_prompt () : t -> t =
         in
         Printf.sprintf
           "GOAL: %s\n\nSPEC:\n%s\n\nDESIGN:\n%s\n\n\
-           PREVIOUS IMPLEMENTATION (iteration %d):\n%s\n\n\
-           QA REPORTED:\n%s%s\n\n\
-           Revise the implementation (iteration %d of max %d). FIX every \
-           blocker and major issue. List which issues you addressed in \
-           [addresses_issues]. Output complete revised code via \
-           submit_implementation."
-          state.goal spec_text design_text state.iteration prev.content
+           WORKING DIRECTORY: %s\n\
+           This directory already contains your previous implementation \
+           that QA reviewed. Your job: REVISE it to fix the issues.\n\n\
+           QA REPORTED on iteration %d:\n%s%s\n\n\
+           Steps for this revision (iteration %d of max %d):\n\
+          \  1. Use view_file to read the current files in %s. Start \
+           with files referenced by QA issues.\n\
+          \  2. Use write_file to modify them. Prefer minimal targeted \
+           changes — don't rewrite working code.\n\
+          \  3. Use bash (exec_dir=%s) to re-run the tests / build. \
+           Verify your fixes actually work.\n\
+          \  4. Iterate via view_file + write_file + bash until tests \
+           pass and the issues are addressed.\n\
+          \  5. Call submit_implementation with addresses_issues listing \
+           which QA issues you fixed and how (one line each).\n\n\
+           Fix EVERY blocker and major issue. Minor issues are optional. \
+           If a QA issue seems wrong, fix it anyway and explain in \
+           addresses_issues."
+          state.goal spec_text design_text state.working_dir state.iteration
           issues_text suggestions_text iter state.max_iterations
+          state.working_dir state.working_dir
     | Some _, None ->
-        (* shouldn't happen but degrade gracefully *)
         Printf.sprintf
-          "GOAL: %s\n\nSPEC:\n%s\n\nDESIGN:\n%s\n\n\
-           Iterate on the implementation (no QA report yet, treat as \
-           initial). Submit via submit_implementation."
-          state.goal spec_text design_text
+          "GOAL: %s\n\nSPEC:\n%s\n\nDESIGN:\n%s\n\nWORKING DIR: %s\n\n\
+           Iterate on the implementation (no QA report yet). Inspect \
+           current files, modify, re-test. Submit via \
+           submit_implementation."
+          state.goal spec_text design_text state.working_dir
   in
   let input =
     run_and_capture ~name:"fullstack" ~role_prompt ~user_input
@@ -612,13 +648,13 @@ let make_fullstack_node ?(extra_tools = []) ~role_prompt () : t -> t =
       ()
   in
   let new_impl =
-    { author = "fullstack"; content = parse_implementation input; iteration = iter }
+    {
+      author = "fullstack";
+      content = parse_implementation input;
+      iteration = iter;
+    }
   in
-  {
-    state with
-    implementation = Some new_impl;
-    iteration = iter;
-  }
+  { state with implementation = Some new_impl; iteration = iter }
 
 let make_qa_node ?(extra_tools = []) ~role_prompt () : t -> t =
  fun state ->
@@ -633,12 +669,37 @@ let make_qa_node ?(extra_tools = []) ~role_prompt () : t -> t =
       in
       let user_input =
         Printf.sprintf
-          "Review this implementation against the spec.\n\nSPEC:\n%s\n\n\
-           IMPLEMENTATION (iteration %d of max %d):\n%s\n\n\
-           Be strict. Iteration %d is the LAST allowed attempt — flag \
-           ALL issues now. Submit findings via submit_qa_report. \
-           pass=true ONLY if NO blocker or major issues remain."
-          spec_text state.iteration state.max_iterations impl.content
+          "Verify the implementation against the spec.\n\n\
+           SPEC:\n%s\n\n\
+           WORKING DIRECTORY: %s\n\
+           The implementation is on disk at this path (iteration %d of \
+           max %d). The fullstack engineer summarized:\n\
+           %s\n\n\
+           Steps you MUST do — in order:\n\
+          \  1. Use bash (exec_dir=%s) to run `ls -la` and discover the \
+           file layout. Then view_file the key files (package.json or \
+           equivalent, the main source, the tests, README).\n\
+          \  2. Use bash to run the build and tests. The standard \
+           commands depend on the stack — try the deployment_notes the \
+           engineer left, or pick reasonable defaults (npm install && \
+           npm test, or npm run build, or python -m pytest, or go test \
+           ./..., etc).\n\
+          \  3. Read the test output and exit code carefully.\n\
+          \  4. Independently of test results, inspect the code for \
+           real-quality problems: missing edge cases, validation that \
+           doesn't actually validate, error paths that swallow errors, \
+           contradictions with acceptance criteria.\n\
+          \  5. Submit findings via submit_qa_report:\n\
+          \     • pass=true ONLY if (a) build succeeded, (b) tests \
+           passed, (c) no blocker/major issues from your review.\n\
+          \     • For each issue, give specific severity, file/line if \
+           possible, and what's wrong. Vague issues are useless.\n\
+          \     • In suggestions, give concrete fix hints — code-level \
+           when possible.\n\n\
+           Be strict on iteration %d (last attempt is %d) — flag every \
+           real issue you see now."
+          spec_text state.working_dir state.iteration state.max_iterations
+          impl.content state.working_dir state.iteration
           state.max_iterations
       in
       let input =
@@ -682,6 +743,7 @@ let print_summary state =
   print_endline "";
   print_endline "================ TEAM RUN SUMMARY ================";
   Printf.printf "Goal: %s\n" state.goal;
+  Printf.printf "Working dir: %s\n" state.working_dir;
   Printf.printf "Iterations used: %d / %d\n" state.iteration state.max_iterations;
   (match state.latest_qa with
   | Some r when r.pass ->

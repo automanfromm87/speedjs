@@ -9,11 +9,13 @@
 let goal = ref None
 let max_iters = ref 3
 let log_file = ref None
+let working_dir = ref None
 
 let usage () =
   prerr_endline "usage: squad [options] \"<goal>\"";
-  prerr_endline "  --max-iters N    fullstack/qa loop cap (default 3)";
-  prerr_endline "  --log-file PATH  write logs here (default stderr)";
+  prerr_endline "  --max-iters N      fullstack/qa loop cap (default 3)";
+  prerr_endline "  --log-file PATH    write logs here (default stderr)";
+  prerr_endline "  --working-dir PATH absolute path; the dir code lives in (REQUIRED)";
   exit 2
 
 let parse_args argv =
@@ -30,6 +32,10 @@ let parse_args argv =
         if !i + 1 >= n then usage ();
         log_file := Some argv.(!i + 1);
         incr i
+    | "--working-dir" ->
+        if !i + 1 >= n then usage ();
+        working_dir := Some argv.(!i + 1);
+        incr i
     | "-h" | "--help" -> usage ()
     | s when not (String.starts_with ~prefix:"--" s) -> goal := Some s
     | other ->
@@ -37,7 +43,18 @@ let parse_args argv =
         usage ());
     incr i
   done;
-  match !goal with None -> usage () | Some g -> g
+  let g = match !goal with None -> usage () | Some g -> g in
+  let wd =
+    match !working_dir with
+    | None ->
+        prerr_endline "error: --working-dir is required";
+        usage ()
+    | Some d when not (Filename.is_relative d) -> d
+    | Some _ ->
+        prerr_endline "error: --working-dir must be an absolute path";
+        usage ()
+  in
+  (g, wd)
 
 (* ===== role prompts ===== *)
 
@@ -83,61 +100,92 @@ Express not 'a web framework'). Submit via submit_design.|}
 
 let fullstack_prompt =
   {|You are a senior fullstack engineer. You implement the spec and design \
-in real, runnable code.
+in real, runnable code that you actually verify works.
 
-On INITIAL iteration:
-  • Implement the design completely. Real code, not pseudocode.
-  • Multiple files separated by '// ===== filename =====' headers (or \
-    '# ===== filename =====' for Python/etc).
-  • Include all necessary imports, types, error handling.
+You have access to write_file, view_file, and bash tools. USE THEM:
+  • write_file: create / overwrite source files. Always pass absolute paths.
+  • view_file: read existing files (essential on revisions to see what's \
+    there before changing it).
+  • bash: run installation, build, and tests. Always set exec_dir to the \
+    working directory the user message gives you. The kernel runs sh -c \
+    "cd $exec_dir && (your command)".
 
-On REVISION iterations (when QA reports issues):
-  • Fix EVERY blocker and major issue. Don't skip any.
-  • You can fix minors at your discretion if cheap.
-  • In [addresses_issues], list (briefly) which QA issues this revision \
-    fixes, mapping to the specific code change.
-  • You CAN restructure if needed — don't be afraid to refactor.
+You MUST verify your code works:
+  1. Pick a realistic stack matching the design (Node+TS+Express, \
+     Python+FastAPI, Go+net/http, etc).
+  2. Write_file the source + tests + package.json (or equivalent).
+  3. bash to install dependencies and run the tests / build.
+  4. If something fails, debug by viewing the files and editing them.
+  5. ONLY when build + tests pass, call submit_implementation.
 
-Pick a realistic stack (TypeScript/Node, Python, Go, etc — match the \
-design's API choices). Don't be lazy: actually wire up routes, real \
-storage, real validation. Submit via submit_implementation.|}
+Sandboxing: write_file is restricted to the working_dir given to you. \
+Don't try to write outside it — it will fail. bash inherits no such \
+restriction; don't `rm -rf` anything outside the working_dir.
+
+On REVISION iterations:
+  • view_file the relevant files first.
+  • Make minimal targeted changes — don't rewrite working code.
+  • Re-run tests via bash to verify fixes.
+  • In [addresses_issues], list which QA issues you fixed.
+
+submit_implementation expects:
+  • code: SHORT description of project layout (file list + 1 line each). \
+    NOT the full source dump — the source is on disk.
+  • deployment_notes: 1-2 lines on how to run + which commands you used \
+    to verify (e.g. "ran `npm test`, 4/4 passed").
+  • addresses_issues: empty on initial, populated on revisions.
+
+Don't be lazy: actually run tests. Don't trust 'looks correct' — verify \
+with bash before submitting.|}
 
 let qa_prompt =
-  {|You are a senior QA engineer. You review implementations against the \
-spec — strictly.
+  {|You are a senior QA engineer. You verify implementations against the \
+spec — strictly, by ACTUALLY RUNNING THE CODE.
 
-What you check:
-  • Does the code actually implement EVERY acceptance criterion?
-  • Are edge cases handled (empty input, large input, concurrent \
-    access, malformed data)?
-  • Are errors propagated correctly and meaningfully?
-  • Is the code likely to RUN (no obvious type errors, missing \
-    imports, undefined variables)?
-  • Are validation rules from the spec actually enforced?
+You have view_file and bash tools. USE THEM:
+  • bash with exec_dir=<working_dir>: run ls, npm install, npm test, \
+    npm run build, pytest, go test, etc. Whatever the stack needs.
+  • view_file: read the actual files. Don't trust the engineer's \
+    summary — read the code yourself.
+
+Required verification flow:
+  1. bash `ls -la` to discover the layout.
+  2. view_file the key files (package.json or equivalent, main source, \
+     tests, README).
+  3. bash to run install + build + tests (commands depend on stack).
+  4. Read the test output and exit code carefully. A non-zero exit \
+     code is a blocker. Test failures are blockers. Type errors are \
+     blockers.
+  5. Beyond tests: inspect for issues you can spot only by reading — \
+     missing edge cases, validation rules from the spec that aren't \
+     enforced, error paths that swallow errors, etc.
 
 Severity scale:
-  • blocker — would prevent the feature from working at all (missing \
-    endpoint, security hole, definitely-buggy logic).
-  • major — would cause user-visible issues or violate an acceptance \
-    criterion (missing edge case, bad error message, slow on large input).
-  • minor — code style, naming, missing comments, suggestions for \
-    improvement.
+  • blocker — code doesn't run or doesn't fundamentally implement the \
+    spec. Build failure, test failure, missing endpoint, security hole.
+  • major — runs but violates an acceptance criterion or has a \
+    user-visible bug. Missing edge case handling, wrong error code, \
+    slow on large input.
+  • minor — style, naming, suggestions. Doesn't block ship.
 
 Rules:
-  • pass=true ONLY if NO blocker or major issues remain. Even one \
-    blocker or major means pass=false.
-  • Be SPECIFIC in issue descriptions: cite the relevant function / \
-    line / behavior. Vague issues are useless to the engineer.
-  • In suggestions[], propose concrete fixes — sometimes literal code \
-    snippets.
+  • pass=true ONLY if (a) build succeeds, (b) all tests pass, (c) no \
+    blocker/major issues from your review. Even ONE blocker or major \
+    means pass=false.
+  • Be SPECIFIC: cite the file path + line / function name. Quote the \
+    actual error output. Vague issues are useless.
+  • In suggestions[], propose concrete fixes — code snippets when you \
+    can.
 
 You're not adversarial; you want the engineer to succeed. But you DO \
-want this to ship correctly. Submit via submit_qa_report.|}
+want this to ship correctly. The user trusts you to be the last \
+defense before this code is considered done. Submit via \
+submit_qa_report.|}
 
 (* ===== main ===== *)
 
 let () =
-  let goal = parse_args Sys.argv in
+  let goal, working_dir = parse_args Sys.argv in
   let model =
     match Sys.getenv_opt "SPEEDJS_MODEL" with
     | Some m when m <> "" -> m
@@ -160,11 +208,14 @@ let () =
       tape_path = None;
       crash_after = None;
       emit_governor_events_to_log = false;
-      sandbox_root = None;
+      (* Sandbox file ops to the working dir. bash is unrestricted —
+         the prompt warns the agent not to wreck the host. *)
+      sandbox_root = Some working_dir;
     }
   in
 
   Log.f "[squad] goal: %s" goal;
+  Log.f "[squad] working_dir: %s" working_dir;
   Log.f "[squad] max_iters: %d (fullstack/qa loop cap)" !max_iters;
 
   let pm_node =
@@ -173,29 +224,40 @@ let () =
   let design_node =
     Speedjs.Team.make_design_node ~role_prompt:design_prompt ()
   in
+  (* Fullstack and QA need real I/O tools to write code, run tests,
+     and inspect results. PM and Design stay pure — they only produce
+     text artifacts that flow into the next role's prompt. *)
+  let dev_tools =
+    [ Speedjs.Tools.write_file; Speedjs.Tools.view_file; Speedjs.Tools.bash ]
+  in
+  let qa_tools =
+    [ Speedjs.Tools.view_file; Speedjs.Tools.bash ]
+  in
   let fullstack_node =
-    Speedjs.Team.make_fullstack_node ~role_prompt:fullstack_prompt ()
+    Speedjs.Team.make_fullstack_node ~extra_tools:dev_tools
+      ~role_prompt:fullstack_prompt ()
   in
   let qa_node =
-    Speedjs.Team.make_qa_node ~role_prompt:qa_prompt ()
+    Speedjs.Team.make_qa_node ~extra_tools:qa_tools ~role_prompt:qa_prompt ()
   in
   let workflow =
     Speedjs.Team.make_workflow ~pm_node ~design_node ~fullstack_node ~qa_node
   in
 
   let initial =
-    Speedjs.Team.initial ~goal ~max_iterations:!max_iters
+    Speedjs.Team.initial ~goal ~working_dir ~max_iterations:!max_iters
   in
 
   let final =
     Speedjs.Runtime.install
       ~tools:
-        [
-          Speedjs.Team.submit_spec_tool;
-          Speedjs.Team.submit_design_tool;
-          Speedjs.Team.submit_implementation_tool;
-          Speedjs.Team.submit_qa_report_tool;
-        ]
+        ([
+           Speedjs.Team.submit_spec_tool;
+           Speedjs.Team.submit_design_tool;
+           Speedjs.Team.submit_implementation_tool;
+           Speedjs.Team.submit_qa_report_tool;
+         ]
+        @ dev_tools)
       ~config:runtime_config
       (fun () ->
         Speedjs.Topology.install Speedjs.Topology.direct (fun () ->
