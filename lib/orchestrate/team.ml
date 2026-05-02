@@ -460,7 +460,17 @@ let parse_qa_report (input : Yojson.Safe.t) : qa_report =
 
 (* ===== Generic role-node runner ===== *)
 
-let run_role ~name ~role_prompt ~user_input ~tools () =
+(** Run a role with a clear separation between TERMINAL and DEV tools:
+    - [terminal_tool] short-circuits the agent loop (one shot, like
+      submit_X — handler never runs)
+    - [dev_tools] run normally inside the loop (write_file, view_file,
+      bash, etc); the loop continues after each.
+
+    This matters: passing dev tools as terminal_tools would make the
+    LLM's first write_file call exit the loop immediately, leaving no
+    work done. *)
+let run_role ~name ~role_prompt ~user_input ~terminal_tool
+    ~(dev_tools : tool_def list) ~max_iterations () =
   let conv =
     match
       Conversation.of_messages
@@ -470,26 +480,29 @@ let run_role ~name ~role_prompt ~user_input ~tools () =
     | Error msg ->
         failwith ("team: malformed input — " ^ msg)
   in
+  let all_tools = terminal_tool :: dev_tools in
   let ctx =
     Context.empty
-    |> Context.with_tools tools
+    |> Context.with_tools all_tools
     |> Context.apply_system ~system_prompt:role_prompt
     |> Context.with_conversation conv
   in
-  Agent.run_loop ~max_iterations:8
-    ~terminal_tools:(List.map (fun (t : tool_def) -> t.name) tools)
+  Agent.run_loop ~max_iterations
+    ~terminal_tools:[ terminal_tool.name ]
     ~name ~ctx ()
 
-(* Run a role and return its terminal_tool input as raw JSON. Errors / no
-   submit_X ⇒ a synthetic JSON object with an "_error" field so the
-   downstream parser can degrade gracefully. *)
-let run_and_capture ~name ~role_prompt ~user_input ~tools () : Yojson.Safe.t =
+let run_and_capture ~name ~role_prompt ~user_input ~terminal_tool
+    ?(dev_tools = []) ?(max_iterations = 30) () : Yojson.Safe.t =
   try
-    match run_role ~name ~role_prompt ~user_input ~tools () with
+    match
+      run_role ~name ~role_prompt ~user_input ~terminal_tool ~dev_tools
+        ~max_iterations ()
+    with
     | Ok (text, _) ->
         `Assoc
           [
-            ("_error", `String "agent ended turn without calling terminal tool");
+            ("_error",
+             `String "agent ended turn without calling terminal tool");
             ("_text", `String text);
           ]
     | Error (e, _) ->
@@ -510,8 +523,7 @@ let make_pm_node ?(extra_tools = []) ~role_prompt () : t -> t =
   in
   let input =
     run_and_capture ~name:"product" ~role_prompt ~user_input
-      ~tools:(submit_spec_tool :: extra_tools)
-      ()
+      ~terminal_tool:submit_spec_tool ~dev_tools:extra_tools ()
   in
   {
     state with
@@ -541,8 +553,7 @@ let make_design_node ?(extra_tools = []) ~role_prompt () : t -> t =
   in
   let input =
     run_and_capture ~name:"design" ~role_prompt ~user_input
-      ~tools:(submit_design_tool :: extra_tools)
-      ()
+      ~terminal_tool:submit_design_tool ~dev_tools:extra_tools ()
   in
   {
     state with
@@ -644,8 +655,7 @@ let make_fullstack_node ?(extra_tools = []) ~role_prompt () : t -> t =
   in
   let input =
     run_and_capture ~name:"fullstack" ~role_prompt ~user_input
-      ~tools:(submit_implementation_tool :: extra_tools)
-      ()
+      ~terminal_tool:submit_implementation_tool ~dev_tools:extra_tools ()
   in
   let new_impl =
     {
@@ -704,8 +714,7 @@ let make_qa_node ?(extra_tools = []) ~role_prompt () : t -> t =
       in
       let input =
         run_and_capture ~name:"qa" ~role_prompt ~user_input
-          ~tools:(submit_qa_report_tool :: extra_tools)
-          ()
+          ~terminal_tool:submit_qa_report_tool ~dev_tools:extra_tools ()
       in
       let report = parse_qa_report input in
       let new_history = (impl, Some report) :: state.history in
