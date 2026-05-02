@@ -50,9 +50,21 @@ let build_llm_chain ~config : Llm_handler.t =
   |> Llm_handler.with_governor_ticks
   |> Llm_handler.with_logging ~on_log:config.on_log
 
+(** [Tool_handler.with_timeout] is intentionally NOT in the default
+    chain. It dispatches the inner handler in a worker thread to
+    enforce wall-clock; OCaml 5 effect handlers do NOT propagate to
+    threads, so any tool that performs an Effect from its handler
+    (view_file, write_file, current_time, delegate, parallel_delegate,
+    skill loader's load tracking, ...) would crash with
+    Effect.Unhandled inside the worker.
+
+    Tools that DO need wall-clock caps for blocking subprocesses
+    self-implement: [Tools.bash] uses [run_with_timeout]; [http_get]
+    uses [curl --max-time]; [Mcp] uses [read_timeout_sec]. The
+    middleware version remains exported for callers who want it
+    around purely-synchronous tools without effects. *)
 let build_tool_chain ~config : Tool_handler.t =
   Tool_handler.direct
-  |> Tool_handler.with_timeout ~default_sec:60.0
   |> Tool_handler.with_validation
   |> Tool_handler.with_retry ~policy:Llm_handler.Retry_policy.default
   |> Tool_handler.with_circuit_breaker ~failure_threshold:5 ~cooldown:60.0

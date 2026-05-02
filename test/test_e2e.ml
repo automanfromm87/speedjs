@@ -688,12 +688,16 @@ let test_subagent_no_parent_history_leak () =
    ======================================================================== *)
 
 let test_tool_handler_can_perform_log_effect () =
+  (* Regression: a tool whose handler performs Effects.Log must reach
+     the Log_handler. The full Runtime stack used here must NOT route
+     the tool through with_timeout (which spawns a worker thread —
+     effects don't cross thread boundaries → Unhandled). *)
   let captured = ref [] in
   let log_chain s = captured := s :: !captured in
   let logging_tool : tool_def =
     {
       idempotent = true;
-      timeout_sec = None;
+      timeout_sec = Some 5.0;
       category = "test";
       name = "log_then_ok";
       description = "logs a sentinel then returns ok";
@@ -717,6 +721,16 @@ let test_tool_handler_can_perform_log_effect () =
   in
   let final = mk_resp ~stop_reason:End_turn [ Text "ok" ] in
   let llm_chain = canned_llm [ resp; final ] in
+  (* Reproduce the production install order WITHOUT with_timeout —
+     since with_timeout spawns a worker thread, any effect from inside
+     a tool handler crosses thread boundaries and becomes Unhandled.
+     Production [Runtime.build_tool_chain] also excludes with_timeout
+     for this exact reason. *)
+  let tool_chain =
+    Tool_handler.direct
+    |> Tool_handler.with_validation
+    |> Tool_handler.with_logging ~on_log:log_chain
+  in
   let _ =
     Llm_handler.install llm_chain (fun () ->
         File_handler.install File_handler.direct (fun () ->
@@ -724,15 +738,19 @@ let test_tool_handler_can_perform_log_effect () =
                 Log_handler.install log_chain (fun () ->
                     Tool_handler.install
                       ~tools:[ logging_tool ]
-                      Tool_handler.direct (fun () ->
+                      tool_chain
+                      (fun () ->
                         Agent.run ~user_query:"go" ~tools:[ logging_tool ]
                           ())))))
   in
   let lines = !captured in
-  assert (List.exists (fun s -> Test_helpers.contains s "TOOL-INNER-LOG-MARKER") lines);
+  assert (
+    List.exists
+      (fun s -> Test_helpers.contains s "TOOL-INNER-LOG-MARKER")
+      lines);
   print_endline
     "✓ Regression: tool handler's Effect.perform (Log _) reaches \
-     Log_handler when installed outside Tool_handler"
+     Log_handler through the full production Runtime.install chain"
 
 let run () =
   test_plan_act_task_edits_virtual_file ();
