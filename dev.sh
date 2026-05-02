@@ -23,15 +23,21 @@ LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-run.log}"
 TAPE_FILE="${SPEEDJS_TAPE:-/tmp/notes-build.tape}"
 PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/notes-app}"
 SKILLS_DIR="$SCRIPT_DIR/skills"
+TRACE_FILE="${SPEEDJS_TRACE:-}"   # set this to enable structured tracing
 
 if [ -z "${RESUME:-}" ]; then
   rm -rf "$PROJECT_DIR" "$TAPE_FILE" /tmp/speedjs-memory
+  [ -n "$TRACE_FILE" ] && : > "$TRACE_FILE"
 fi
+
+TRACE_FLAG=()
+[ -n "$TRACE_FILE" ] && TRACE_FLAG=(--trace-file "$TRACE_FILE")
 
 echo "→ project: $PROJECT_DIR"
 echo "→ skills:  $SKILLS_DIR"
 echo "→ logs:    $LOG_FILE   (tail -f to follow live)"
 echo "→ tape:    $TAPE_FILE  (RESUME=1 ./dev.sh to continue from crash)"
+[ -n "$TRACE_FILE" ] && echo "→ trace:   $TRACE_FILE  (open tools/trace_viewer.html)"
 echo
 
 dune exec speedjs -- \
@@ -44,6 +50,7 @@ dune exec speedjs -- \
   --working-dir "$PROJECT_DIR" \
   --log-file "$LOG_FILE" \
   --tape "$TAPE_FILE" \
+  "${TRACE_FLAG[@]}" \
   --memory-dir "/tmp/speedjs-memory" \
   "Build a production-quality full-stack Notes app at $PROJECT_DIR.
 
