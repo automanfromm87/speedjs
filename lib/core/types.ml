@@ -267,6 +267,12 @@ type cost_state = {
   mutable cache_creation_tokens : int;
   mutable cache_read_tokens : int;
   mutable calls : int;
+  (* Step + tool counters live here too so [Governor.max_steps] and
+     [Governor.max_tool_calls] are GLOBAL caps across parallel
+     sub-agents. Each child Domain installs its own Governor that
+     reads + increments these counters under [mu]. *)
+  mutable steps : int;
+  mutable tool_calls : int;
   mu : Mutex.t;
       (** Guards mutations from parallel sub-agents, which all share
           the parent's cost_state so the parent governor sees cumulative
@@ -282,8 +288,22 @@ let new_cost_state () =
     cache_creation_tokens = 0;
     cache_read_tokens = 0;
     calls = 0;
+    steps = 0;
+    tool_calls = 0;
     mu = Mutex.create ();
   }
+
+(** Atomic increment of a single counter — pair with the existing
+    [cost_state_add] which folds an entire LLM call's usage. *)
+let cost_state_inc_step (cost : cost_state) =
+  Mutex.lock cost.mu;
+  cost.steps <- cost.steps + 1;
+  Mutex.unlock cost.mu
+
+let cost_state_inc_tool_call (cost : cost_state) =
+  Mutex.lock cost.mu;
+  cost.tool_calls <- cost.tool_calls + 1;
+  Mutex.unlock cost.mu
 
 (** Mutex-guarded accumulation. Use this from [Llm_handler.with_cost_tracking]
     so parallel sub-agents (which share the parent cost_state) don't race. *)

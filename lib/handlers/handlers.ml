@@ -16,6 +16,8 @@ type cost_state = Types.cost_state = {
   mutable cache_creation_tokens : int;
   mutable cache_read_tokens : int;
   mutable calls : int;
+  mutable steps : int;
+  mutable tool_calls : int;
   mu : Mutex.t;
 }
 

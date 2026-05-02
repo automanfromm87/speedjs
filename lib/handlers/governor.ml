@@ -130,19 +130,28 @@ exception Governor_aborted of {
 (* ===== Internal state ===== *)
 
 type state = {
-  mutable steps : int;
-  mutable tool_calls : int;
   mutable subagent_depth : int;
+      (** Local to this Domain. Parent emits [Subagent_entered] N
+          times before spawning N children — those increments land
+          on the parent's depth. Children's own recursive delegate
+          calls increment their own depth. Independent budgets is
+          the right semantics here: parent caps the fan-out, child
+          caps its own re-entry. *)
   start_time : float;
   clock : unit -> float;
   cost : cost_state;
+      (** [cost.steps] / [cost.tool_calls] / [cost.input_tokens] etc.
+          live HERE — shared across all Domains via [cost_state]'s
+          mutex — so [max_steps], [max_tool_calls], [max_cost_usd]
+          are GLOBAL caps, not per-Domain. *)
   recent_tool_sigs : string Queue.t;
+      (** Death-loop detection is per-Domain too: each child's
+          repetition is detected on its own. Cross-Domain death-loops
+          are a different signal we don't model yet. *)
 }
 
 let make_state ~cost ~clock =
   {
-    steps = 0;
-    tool_calls = 0;
     subagent_depth = 0;
     start_time = clock ();
     clock;
@@ -157,9 +166,10 @@ let abort ~limit ~reason =
 
 let check_steps state limits =
   match limits.Limits.max_steps with
-  | Some m when state.steps > m ->
+  | Some m when state.cost.steps > m ->
       abort ~limit:"max_steps"
-        ~reason:(Printf.sprintf "%d steps exceeded cap %d" state.steps m)
+        ~reason:
+          (Printf.sprintf "%d steps exceeded cap %d" state.cost.steps m)
   | _ -> ()
 
 let check_wall_time state limits =
@@ -184,11 +194,11 @@ let check_cost state limits =
 
 let check_tool_calls state limits =
   match limits.Limits.max_tool_calls with
-  | Some m when state.tool_calls > m ->
+  | Some m when state.cost.tool_calls > m ->
       abort ~limit:"max_tool_calls"
         ~reason:
-          (Printf.sprintf "%d tool calls exceeded cap %d" state.tool_calls
-             m)
+          (Printf.sprintf "%d tool calls exceeded cap %d"
+             state.cost.tool_calls m)
   | _ -> ()
 
 let check_depth state limits =
@@ -228,7 +238,7 @@ let check_repeated state limits sig_ =
 let observe state limits event =
   match event with
   | Event.Llm_started _ ->
-      state.steps <- state.steps + 1;
+      cost_state_inc_step state.cost;
       check_steps state limits;
       check_wall_time state limits;
       check_cost state limits
@@ -242,7 +252,7 @@ let observe state limits event =
          the inner loop. Wall-time check piggy-backs cheaply. *)
       check_wall_time state limits
   | Event.Tool_started { name; input_digest; _ } ->
-      state.tool_calls <- state.tool_calls + 1;
+      cost_state_inc_tool_call state.cost;
       check_tool_calls state limits;
       check_repeated state limits (name ^ ":" ^ input_digest)
   | Event.Tool_finished _ -> ()
