@@ -17,9 +17,12 @@ type _ Effect.t +=
       -> (Id.Tool_use_id.t * tool_handler_result) list Effect.t
       (** Execute one or more tools and return their results in input
           order. Each tuple is [(tool_use_id, name, input)]; output is
-          [(tool_use_id, result)]. Single-tool case is just a 1-element
-          list (handlers may dispatch sequentially); 2+ tools may run in
-          parallel (production handler does this). *)
+          [(tool_use_id, result)]. The production handler dispatches
+          sequentially regardless of batch size — OCaml 5 effect
+          handlers don't propagate to threads, so a worker-thread
+          fan-out path crashes any tool that performs File_*/Time/Log.
+          Domain-based parallelism is a future drop-in (see
+          [Parallel_subagent]). *)
   | Log : string -> unit Effect.t
       (** Emit a log line. Handler decides where it goes. *)
   | Event_log : Event.t -> unit Effect.t

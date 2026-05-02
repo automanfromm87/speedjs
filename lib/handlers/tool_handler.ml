@@ -15,7 +15,8 @@
 
     [install] converts the chain into an effect handler that intercepts
     [Effects.Tool_calls]. The chain operates on a single tool call
-    ([call_args]); batched calls are dispatched in parallel through it.
+    ([call_args]); batched calls dispatch sequentially through it
+    (effect handlers don't propagate to OS threads).
 
     Errors flow through the chain as the unified [Error.t] type, so
     middleware can branch on [Transient] vs [Permanent] semantics. *)
@@ -360,13 +361,17 @@ let truncate_result name r =
     |> Result.map_error Protection.truncate_tool_content
 
 (** Install the chain as an effect handler. Catches [Effects.Tool_calls]
-    and dispatches each tool through the chain; for batches of 2+,
-    runs in parallel via threads.
+    and dispatches each tool through the chain SEQUENTIALLY (one after
+    another). Worker-thread fan-out used to live here for batches of
+    2+ but was removed — tools commonly perform File_* / Time_now /
+    Log effects, and OCaml 5 effect handlers don't propagate to OS
+    threads, so the worker would crash with [Effect.Unhandled].
+    Domain-based per-batch parallelism is the future drop-in path
+    (each Domain installs its own handler stack, see
+    [Parallel_subagent]).
 
     Governor ticks ([Tool_started]/[Tool_finished]/[Tool_timeout]) are
-    emitted on the main fiber, around the dispatch. Worker threads only
-    run the chain + measure duration — they never perform effects, since
-    effect handlers don't propagate to threads.
+    emitted on the main fiber, around the dispatch.
 
     The recursive [wrap] lets tools that perform their own effects
     (notably [delegate], spawning sub-agents) propagate their effects

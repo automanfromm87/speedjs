@@ -84,7 +84,9 @@ let usage () =
   prerr_endline
     "  --skills-dir PATH  --working-dir PATH  --memory-dir PATH";
   prerr_endline
-    "  --sandbox PATH (restrict file ops to this prefix)";
+    "  --sandbox PATH (UX guardrail — textual prefix check only;";
+  prerr_endline
+    "                  does NOT follow symlinks, NOT a security boundary)";
   prerr_endline
     "  --restart (ignore saved plan_state.json and replan from scratch)";
   prerr_endline

@@ -14,8 +14,10 @@
     ]}
 
     [install] converts the chain into an effect handler intercepting
-    [Effects.Tool_calls]. Batches of 2+ tools run in parallel through
-    the chain. *)
+    [Effects.Tool_calls]. Batches of 2+ tools dispatch SEQUENTIALLY
+    through the chain — OCaml 5 effect handlers don't propagate to OS
+    threads, so worker-thread parallelism would crash any tool that
+    performs File_* / Time_now / Log effects. *)
 
 open Types
 
