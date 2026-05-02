@@ -3,8 +3,10 @@
 type kind =
   | Llm_call
   | Tool_call
-  | Agent_spawn          (** reserved *)
-  | Plan_step            (** reserved *)
+  | Agent_spawn         (** Delegated sub-agent run. *)
+  | Plan_step           (** [Plan_act.run_for_task] for one plan task. *)
+  | Phase               (** Orchestration: plan_act_run / planner / recovery / summarizer. *)
+  | Iteration           (** One [Agent.run_loop] iteration. *)
   | Log
 
 type tokens = {

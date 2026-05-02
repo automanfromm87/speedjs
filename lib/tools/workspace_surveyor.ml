@@ -179,8 +179,14 @@ let summarize ~working_dir ~raw : string =
       tool_choice = Tc_auto;
     }
   in
-  let response = Effect.perform (Effects.Llm_complete args) in
-  String.trim (Step.extract_final_text response.content)
+  Trace.span_current ~kind:Trace.Phase ~name:"surveyor"
+    ~input_summary:working_dir
+    ~capture:(fun output ->
+      Trace.ok_capture ~output:(if String.length output > 200 then String.sub output 0 200 ^ "..." else output)
+        ~tokens:Trace.zero_tokens ~cost_delta:0.0)
+    (fun () ->
+      let response = Effect.perform (Effects.Llm_complete args) in
+      String.trim (Step.extract_final_text response.content))
 
 (** Top-level: scan [working_dir] and return a markdown workspace brief.
     Empty string when the directory doesn't exist, is empty, or any step

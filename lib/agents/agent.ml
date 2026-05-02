@@ -64,9 +64,33 @@ let run_loop ?(max_iterations = default_max_iterations)
         end
         else Tc_auto
       in
-      match
-        Step.once ~strategy ~tool_choice ~terminal_tools ~ctx ()
-      with
+      let capture (o : Step.result) : Trace.capture_result =
+        let label, ok =
+          match o with
+          | Step.Continue _ -> ("continue", true)
+          | Step.Terminal_text _ -> ("terminal_text", true)
+          | Step.Terminal_tool { tool_name; _ } ->
+              (Printf.sprintf "terminal_tool=%s" tool_name, true)
+          | Step.Wait_for_user _ -> ("wait_for_user", true)
+          | Step.Failed { reason; _ } ->
+              (Printf.sprintf "failed: %s" (agent_error_pp reason), false)
+        in
+        {
+          output = label;
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok;
+          error = None;
+        }
+      in
+      let outcome =
+        Trace.span_current ~kind:Trace.Iteration
+          ~name:(Printf.sprintf "%s:iter:%d" name iter)
+          ~input_summary:"" ~capture
+          (fun () ->
+            Step.once ~strategy ~tool_choice ~terminal_tools ~ctx ())
+      in
+      match outcome with
       | Step.Continue ctx -> loop ctx (iter + 1)
       | Step.Terminal_text { answer; ctx } -> Ok (answer, ctx)
       | Step.Terminal_tool { tool_name; input; ctx } ->

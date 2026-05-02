@@ -164,6 +164,23 @@ let plan ?(system_prompt = default_system_prompt)
     ?(max_iterations = default_planner_max_iter)
     ?(research_tools : tool_def list = []) ~goal () :
     (plan, agent_error) Result.t =
+  let capture (r : (plan, agent_error) Result.t) : Trace.capture_result =
+    match r with
+    | Ok p ->
+        Trace.ok_capture
+          ~output:(Printf.sprintf "%d task(s)" (List.length p.tasks))
+          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+    | Error e ->
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some (agent_error_pp e);
+        }
+  in
+  Trace.span_current ~kind:Trace.Phase ~name:"planner"
+    ~input_summary:goal ~capture (fun () ->
   Effect.perform
     (Effects.Log
        (Printf.sprintf "[planner] decomposing goal: %s"
@@ -234,7 +251,7 @@ let plan ?(system_prompt = default_system_prompt)
             (Plan_invalid
                "planner: unexpected stop reason without submit_plan")
   in
-  loop initial_messages 1
+  loop initial_messages 1)
 
 (* ===== Plan recovery =====
 
@@ -409,6 +426,32 @@ let recover ?(max_iterations = default_planner_max_iter)
     ?(cycle_index = 0) ?(max_cycles = 2) ~goal ~completed ~failed_task
     ~failed_error ~remaining () :
     (recovery_decision, agent_error) Result.t =
+  let capture (r : (recovery_decision, agent_error) Result.t)
+      : Trace.capture_result =
+    match r with
+    | Ok decision ->
+        let label =
+          match decision with
+          | Replan _ -> "REPLAN"
+          | Split _ -> "SPLIT"
+          | Skip -> "SKIP"
+          | Abandon -> "ABANDON"
+        in
+        Trace.ok_capture ~output:label ~tokens:Trace.zero_tokens
+          ~cost_delta:0.0
+    | Error e ->
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some (agent_error_pp e);
+        }
+  in
+  Trace.span_current ~kind:Trace.Phase
+    ~name:(Printf.sprintf "recovery#%d" cycle_index)
+    ~input_summary:(Printf.sprintf "task %d: %s" failed_task.index failed_error)
+    ~capture (fun () ->
   Effect.perform
     (Effects.Log
        (Printf.sprintf
@@ -489,4 +532,4 @@ let recover ?(max_iterations = default_planner_max_iter)
             (Plan_invalid
                "recovery: unexpected stop reason without submit_recovery")
   in
-  loop initial_messages 1
+  loop initial_messages 1)

@@ -7,10 +7,12 @@
     [--trace-file PATH] in the CLI. *)
 
 type kind =
-  | Llm_call
-  | Tool_call
-  | Agent_spawn          (* reserved for future use *)
-  | Plan_step            (* reserved for future use *)
+  | Llm_call             (** One logical LLM call (covers retries). *)
+  | Tool_call            (** One logical tool dispatch (covers retries). *)
+  | Agent_spawn          (** A delegated sub-agent run. *)
+  | Plan_step            (** One [Plan_act.run_for_task] (one task). *)
+  | Phase                (** Orchestration boundary: plan_act / planner / recovery / summarizer. *)
+  | Iteration            (** One iteration of [Agent.run_loop] — gives clear iter boundaries in the trace. *)
   | Log
 
 let kind_to_string = function
@@ -18,6 +20,8 @@ let kind_to_string = function
   | Tool_call -> "tool_call"
   | Agent_spawn -> "agent_spawn"
   | Plan_step -> "plan_step"
+  | Phase -> "phase"
+  | Iteration -> "iteration"
   | Log -> "log"
 
 type tokens = {

@@ -251,6 +251,23 @@ let format_task_results plan results =
 
 (** Synthesizer LLM call to produce a final answer. *)
 let summarize ~plan ~results () : agent_result =
+  let capture (r : agent_result) : Trace.capture_result =
+    match r with
+    | Ok answer ->
+        Trace.ok_capture
+          ~output:(if String.length answer > 200 then String.sub answer 0 200 ^ "..." else answer)
+          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+    | Error e ->
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some (agent_error_pp e);
+        }
+  in
+  Trace.span_current ~kind:Trace.Phase ~name:"summarizer"
+    ~input_summary:plan.goal ~capture (fun () ->
   Effect.perform (Effects.Log "[summarizer] synthesizing final answer");
   let user_msg =
     Printf.sprintf
@@ -266,7 +283,7 @@ let summarize ~plan ~results () : agent_result =
     }
   in
   let response = Effect.perform (Effects.Llm_complete args) in
-  Ok (Step.extract_final_text response.content)
+  Ok (Step.extract_final_text response.content))
 
 let executor_memory_name = "executor"
 
@@ -385,6 +402,27 @@ let default_config =
     on startup (continue.sh-style resume) and persisted after each
     successful task. *)
 let run ?(config = default_config) ~goal ~tools () : agent_result =
+  (* Outer Phase span so every LLM/Tool/Plan_step inside this run gets
+     parented under one root in the trace, instead of the planner LLM,
+     each plan_step, recovery LLM, and summarizer all appearing as
+     sibling top-level frames. *)
+  let capture (r : agent_result) : Trace.capture_result =
+    match r with
+    | Ok answer ->
+        Trace.ok_capture
+          ~output:(if String.length answer > 200 then String.sub answer 0 200 ^ "..." else answer)
+          ~tokens:Trace.zero_tokens ~cost_delta:0.0
+    | Error e ->
+        {
+          output = "";
+          tokens = Trace.zero_tokens;
+          cost_delta = 0.0;
+          ok = false;
+          error = Some (agent_error_pp e);
+        }
+  in
+  Trace.span_current ~kind:Trace.Phase ~name:"plan_act"
+    ~input_summary:goal ~capture (fun () ->
   let { skip_summarizer; max_iterations_per_task = max_iter;
         max_task_retries; max_recoveries; working_dir; memory_dir;
         model; planner_system_prompt;
@@ -700,4 +738,4 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
       (match (result, memory_dir) with
       | Ok _, Some dir -> Plan_state.clear ~dir
       | _ -> ());
-      result
+      result)
