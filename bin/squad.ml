@@ -10,12 +10,16 @@ let goal = ref None
 let max_iters = ref 3
 let log_file = ref None
 let working_dir = ref None
+let resume = ref false
 
 let usage () =
   prerr_endline "usage: squad [options] \"<goal>\"";
   prerr_endline "  --max-iters N      fullstack/qa loop cap (default 3)";
   prerr_endline "  --log-file PATH    write logs here (default stderr)";
   prerr_endline "  --working-dir PATH absolute path; the dir code lives in (REQUIRED)";
+  prerr_endline "  --resume           skip PM+design, start with a fresh QA pass on";
+  prerr_endline "                     existing files in --working-dir; if QA fails,";
+  prerr_endline "                     fullstack revises in the loop";
   exit 2
 
 let parse_args argv =
@@ -36,6 +40,7 @@ let parse_args argv =
         if !i + 1 >= n then usage ();
         working_dir := Some argv.(!i + 1);
         incr i
+    | "--resume" -> resume := true
     | "-h" | "--help" -> usage ()
     | s when not (String.starts_with ~prefix:"--" s) -> goal := Some s
     | other ->
@@ -241,11 +246,65 @@ let () =
     Speedjs.Team.make_qa_node ~extra_tools:qa_tools ~role_prompt:qa_prompt ()
   in
   let workflow =
-    Speedjs.Team.make_workflow ~pm_node ~design_node ~fullstack_node ~qa_node
+    if !resume then
+      (* Skip PM + design. Start with a fresh QA pass on whatever's
+         already on disk; if QA fails, enter the normal fullstack/qa
+         revision loop. *)
+      Speedjs.Topology.Sequence
+        [
+          Speedjs.Topology.Node { name = "qa"; run = qa_node };
+          Speedjs.Topology.Loop_until
+            {
+              cond =
+                (fun (s : Speedjs.Team.t) ->
+                  match s.latest_qa with
+                  | Some r when r.pass -> true
+                  | _ -> s.iteration >= s.max_iterations);
+              body =
+                Speedjs.Topology.Sequence
+                  [
+                    Speedjs.Topology.Node
+                      { name = "fullstack"; run = fullstack_node };
+                    Speedjs.Topology.Node { name = "qa"; run = qa_node };
+                  ];
+              max_iters = None;
+            };
+        ]
+    else
+      Speedjs.Team.make_workflow ~pm_node ~design_node ~fullstack_node ~qa_node
   in
 
+  (* In resume mode we don't have prior PM/design artifacts in memory,
+     so stub them with placeholders that QA / fullstack will see. The
+     real source of truth is the files on disk — both roles read them
+     via view_file / bash anyway. *)
   let initial =
-    Speedjs.Team.initial ~goal ~working_dir ~max_iterations:!max_iters
+    let s0 = Speedjs.Team.initial ~goal ~working_dir ~max_iterations:!max_iters in
+    if !resume then
+      let stub author note =
+        Some
+          ({ author; content = note; iteration = 0 }
+            : Speedjs.Team.artifact)
+      in
+      {
+        s0 with
+        spec =
+          stub "(resume)"
+            (Printf.sprintf
+               "PRIOR SPEC NOT PERSISTED — review against the original \
+                goal and the existing files at %s. Goal: %s"
+               working_dir goal);
+        design =
+          stub "(resume)"
+            "PRIOR DESIGN NOT PERSISTED — verify the existing layout \
+             on disk matches the goal.";
+        implementation =
+          stub "(resume — existing on disk)"
+            (Printf.sprintf
+               "Existing project at %s. Read it via view_file / bash."
+               working_dir);
+      }
+    else s0
   in
 
   let final =
