@@ -492,7 +492,7 @@ let run_role ~name ~role_prompt ~user_input ~terminal_tool
     ~name ~ctx ()
 
 let run_and_capture ~name ~role_prompt ~user_input ~terminal_tool
-    ?(dev_tools = []) ?(max_iterations = 30) () : Yojson.Safe.t =
+    ?(dev_tools = []) ?(max_iterations = 200) () : Yojson.Safe.t =
   try
     match
       run_role ~name ~role_prompt ~user_input ~terminal_tool ~dev_tools
