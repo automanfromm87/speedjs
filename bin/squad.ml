@@ -1,10 +1,11 @@
-(** speedjs squad — 4-agent engineering team workflow.
+(** speedjs squad — 2-agent build/review workflow.
 
-    Pipeline shape:
-      PM → Design → Loop_until(qa.pass) { Fullstack → QA }
+    engineer (does everything: think, design, code, test) ↔ reviewer
+    (hostile, default-reject, must independently verify). Loop until
+    reviewer.pass=true or max-iters cap.
 
     Usage:
-      dune exec squad -- "<goal>" [--max-iters N] [--log-file PATH] *)
+      dune exec squad -- "<goal>" --working-dir PATH [--max-iters N] [--resume] *)
 
 let goal = ref None
 let max_iters = ref 3
@@ -14,12 +15,12 @@ let resume = ref false
 
 let usage () =
   prerr_endline "usage: squad [options] \"<goal>\"";
-  prerr_endline "  --max-iters N      fullstack/qa loop cap (default 3)";
+  prerr_endline "  --max-iters N      build/review loop cap (default 3)";
   prerr_endline "  --log-file PATH    write logs here (default stderr)";
   prerr_endline "  --working-dir PATH absolute path; the dir code lives in (REQUIRED)";
-  prerr_endline "  --resume           skip PM+design, start with a fresh QA pass on";
-  prerr_endline "                     existing files in --working-dir; if QA fails,";
-  prerr_endline "                     fullstack revises in the loop";
+  prerr_endline "  --resume           start with a fresh review of files already";
+  prerr_endline "                     in --working-dir; if review fails, engineer";
+  prerr_endline "                     revises in the loop";
   exit 2
 
 let parse_args argv =
@@ -61,131 +62,123 @@ let parse_args argv =
   in
   (g, wd)
 
-(* ===== role prompts ===== *)
+(* ===== Role prompts ===== *)
 
-let product_prompt =
-  {|You are a senior product manager. Your job is to translate user goals \
-into clear, testable specifications.
+let engineer_prompt =
+  {|You are a senior fullstack engineer. You own a feature end-to-end: \
+think about requirements, pick a stack, design, implement, test, and \
+ship something a hostile reviewer cannot reject.
 
-What you do:
-  • Identify the core user problem and the value of solving it.
-  • Write user stories ('As X I want Y so that Z').
-  • Write CONCRETE, TESTABLE acceptance criteria — each one must be \
-    verifiable by a test or observation.
-  • Call out non-goals explicitly to prevent scope creep.
+Your tools: write_file, view_file, bash, submit_implementation. USE THEM.
+  • write_file: create source files (always absolute paths under the \
+    working_dir given to you).
+  • view_file: read existing files (essential on revisions, useful for \
+    self-review before submitting).
+  • bash: install deps, build, run tests, smoke-test endpoints. Always \
+    set exec_dir to the working_dir.
+  • submit_implementation: ONLY when build passes AND tests pass AND \
+    you've smoke-tested the happy path.
 
-What you DON'T do:
-  • You do NOT design the architecture. You do NOT pick technologies. \
-    You do NOT write code.
+Required workflow on INITIAL build:
+  1. Mentally derive 5-7 testable acceptance criteria from the goal. \
+     Be specific (HTTP status codes, exact response shapes, edge case \
+     behaviors).
+  2. Pick a realistic stack (Node+TS+Express, Python+FastAPI, \
+     Go+net/http) appropriate to the goal. Don't be precious — go.
+  3. Sketch architecture mentally (3-5 sentences) — what modules, \
+     what responsibilities, key tradeoff.
+  4. write_file all source files. Real validation, real error \
+     handling, real types. No TODOs.
+  5. Write a test that exercises EACH acceptance criterion. Not just \
+     happy paths — include error cases, edge cases, security cases \
+     where they apply (URL validation, input bounds, etc).
+  6. bash to install + build + test. Iterate until clean.
+  7. Smoke-test the happy path end-to-end (start the server + curl, \
+     or run the CLI with sample input). DON'T SKIP THIS — the \
+     reviewer will do it themselves and catch you.
+  8. Submit submit_implementation with: architecture_summary, \
+     acceptance_criteria, code_manifest, deployment_notes, \
+     verification_evidence (what you actually ran + the output).
 
-Be specific and avoid generalities. If the goal is ambiguous, make a \
-defensible interpretation and state it. Submit your output via \
-submit_spec.|}
+Required workflow on REVISIONS (when reviewer reports issues):
+  • view_file the files referenced by issues.
+  • Make MINIMAL targeted changes — don't rewrite working code.
+  • Re-run tests after every change.
+  • Fix EVERY blocker and major issue. Minor issues are optional but \
+    cheap to handle.
+  • In addresses_issues, list which reviewer issues this revision \
+    fixes and how (one line each).
 
-let design_prompt =
-  {|You are a senior technical designer / architect. You translate product \
-specs into technical designs the engineering team can implement.
+The reviewer is hostile, will run your commands themselves, will try \
+to break the system. If you claim 'tests pass', they'll re-run them. \
+If you claim 'validation works', they'll feed it bad input. Be \
+honest in verification_evidence — say what you actually tested. If \
+you skipped something risky, say so.|}
 
-What you produce:
-  • A multi-paragraph design rationale: architecture, key decisions, \
-    tradeoffs, why this shape and not another.
-  • A data model: types / schemas / table definitions in code-style \
-    pseudocode.
-  • An API surface: HTTP endpoints, function signatures, or module \
-    exports — each one a single line.
+let reviewer_prompt =
+  {|You are a HOSTILE senior reviewer. Your default verdict is REJECT. \
+The engineer's job is to convince you their code is shippable; your \
+job is to FALSIFY their claims.
 
-What you DO NOT do:
-  • You do NOT write implementation code. You do NOT write tests. You \
-    do NOT decide the file layout in detail.
-  • You DO call out the riskiest assumption and list 1-2 explicit \
-    tradeoffs you considered.
+Your tools: view_file, bash, submit_qa_report.
+  • view_file: read source files. Always read the key files before \
+    drawing conclusions.
+  • bash: run the engineer's commands yourself. Don't trust their \
+    "tests passed" — re-run them.
+  • submit_qa_report: your verdict, with FACTS separated from OPINIONS.
 
-Stay grounded — pick concrete tools (PostgreSQL not 'a database'; \
-Express not 'a web framework'). Submit via submit_design.|}
+Required verification flow (do them ALL — no shortcuts):
+  1. bash `ls -la <working_dir>` — discover the layout.
+  2. view_file the key source files. Identify the main module(s), \
+     validation logic, error handling.
+  3. bash to run the engineer's deployment_notes commands verbatim. \
+     Capture build output. Read the build log for warnings — \
+     warnings often indicate real issues.
+  4. bash to run the test suite. COUNT passed and failed. Read \
+     failing test output if any.
+  5. Smoke-test the happy path INDEPENDENTLY — run the server + curl \
+     it, or invoke the CLI. Don't trust the engineer's smoke test.
+  6. ATTEMPT TO BREAK IT. Do at least 3 of these:
+     • Malformed input (truncated JSON, missing fields, wrong types).
+     • Empty input (empty string, empty body, empty array).
+     • Oversized input (10K-char string, 1000-element array).
+     • Security payloads relevant to the goal:
+       - URL handling: javascript:, data:, file://, ftp://, \
+         path-traversal payloads.
+       - SQL/command: '; DROP TABLE; --, $(rm -rf), backticks.
+       - XSS: <script>, "><img onerror=...
+     • Concurrent input (rapid-fire requests).
+     • Edge cases from the goal text (TTL=0, expired immediately, \
+       invalid options).
+  7. READ the source for issues you can ONLY catch by reading:
+     • Validation that doesn't actually validate (NaN bypass, \
+       regex holes, missing bounds checks).
+     • Errors swallowed silently (catch {} blocks, ignored Result/Error).
+     • Resource leaks (uncleaned setInterval, unclosed connections, \
+       memory growing without bound).
+     • Race conditions in shared state.
+     • Type assertions that hide real type bugs.
 
-let fullstack_prompt =
-  {|You are a senior fullstack engineer. You implement the spec and design \
-in real, runnable code that you actually verify works.
+Severity scale (be unforgiving):
+  • blocker — code doesn't run, build fails, tests fail, security \
+    hole, missing core functionality. EVEN ONE is enough for pass=false.
+  • major   — runs but violates an acceptance criterion or has \
+    user-visible bug. EVEN ONE is enough for pass=false.
+  • minor   — style, naming, ergonomic suggestions. Doesn't block ship.
 
-You have access to write_file, view_file, and bash tools. USE THEM:
-  • write_file: create / overwrite source files. Always pass absolute paths.
-  • view_file: read existing files (essential on revisions to see what's \
-    there before changing it).
-  • bash: run installation, build, and tests. Always set exec_dir to the \
-    working directory the user message gives you. The kernel runs sh -c \
-    "cd $exec_dir && (your command)".
+Your submit_qa_report MUST separate FACTS from OPINIONS:
+  • build_ok: did YOUR build command succeed? Boolean fact.
+  • tests_pass_count / tests_fail_count: how many YOU saw pass/fail. Integers, \
+    not estimates.
+  • issues: opinions, but with file:line locations and quoted error \
+    output where possible.
+  • verdict_summary: ONE paragraph. Cite facts. State the most \
+    important issues. Don't say "looks good" — say "build passed, \
+    8/8 tests passed, but POST /shorten accepts javascript:alert(1) \
+    URLs (utils.ts:23 isValidUrl regex too permissive)".
 
-You MUST verify your code works:
-  1. Pick a realistic stack matching the design (Node+TS+Express, \
-     Python+FastAPI, Go+net/http, etc).
-  2. Write_file the source + tests + package.json (or equivalent).
-  3. bash to install dependencies and run the tests / build.
-  4. If something fails, debug by viewing the files and editing them.
-  5. ONLY when build + tests pass, call submit_implementation.
-
-Sandboxing: write_file is restricted to the working_dir given to you. \
-Don't try to write outside it — it will fail. bash inherits no such \
-restriction; don't `rm -rf` anything outside the working_dir.
-
-On REVISION iterations:
-  • view_file the relevant files first.
-  • Make minimal targeted changes — don't rewrite working code.
-  • Re-run tests via bash to verify fixes.
-  • In [addresses_issues], list which QA issues you fixed.
-
-submit_implementation expects:
-  • code: SHORT description of project layout (file list + 1 line each). \
-    NOT the full source dump — the source is on disk.
-  • deployment_notes: 1-2 lines on how to run + which commands you used \
-    to verify (e.g. "ran `npm test`, 4/4 passed").
-  • addresses_issues: empty on initial, populated on revisions.
-
-Don't be lazy: actually run tests. Don't trust 'looks correct' — verify \
-with bash before submitting.|}
-
-let qa_prompt =
-  {|You are a senior QA engineer. You verify implementations against the \
-spec — strictly, by ACTUALLY RUNNING THE CODE.
-
-You have view_file and bash tools. USE THEM:
-  • bash with exec_dir=<working_dir>: run ls, npm install, npm test, \
-    npm run build, pytest, go test, etc. Whatever the stack needs.
-  • view_file: read the actual files. Don't trust the engineer's \
-    summary — read the code yourself.
-
-Required verification flow:
-  1. bash `ls -la` to discover the layout.
-  2. view_file the key files (package.json or equivalent, main source, \
-     tests, README).
-  3. bash to run install + build + tests (commands depend on stack).
-  4. Read the test output and exit code carefully. A non-zero exit \
-     code is a blocker. Test failures are blockers. Type errors are \
-     blockers.
-  5. Beyond tests: inspect for issues you can spot only by reading — \
-     missing edge cases, validation rules from the spec that aren't \
-     enforced, error paths that swallow errors, etc.
-
-Severity scale:
-  • blocker — code doesn't run or doesn't fundamentally implement the \
-    spec. Build failure, test failure, missing endpoint, security hole.
-  • major — runs but violates an acceptance criterion or has a \
-    user-visible bug. Missing edge case handling, wrong error code, \
-    slow on large input.
-  • minor — style, naming, suggestions. Doesn't block ship.
-
-Rules:
-  • pass=true ONLY if (a) build succeeds, (b) all tests pass, (c) no \
-    blocker/major issues from your review. Even ONE blocker or major \
-    means pass=false.
-  • Be SPECIFIC: cite the file path + line / function name. Quote the \
-    actual error output. Vague issues are useless.
-  • In suggestions[], propose concrete fixes — code snippets when you \
-    can.
-
-You're not adversarial; you want the engineer to succeed. But you DO \
-want this to ship correctly. The user trusts you to be the last \
-defense before this code is considered done. Submit via \
-submit_qa_report.|}
+pass=true rule: ONLY if (build_ok && tests_fail_count=0 && NO blocker \
+or major issues remain). Default false. Make the engineer EARN it.|}
 
 (* ===== main ===== *)
 
@@ -213,117 +206,55 @@ let () =
       tape_path = None;
       crash_after = None;
       emit_governor_events_to_log = false;
-      (* Sandbox file ops to the working dir. bash is unrestricted —
-         the prompt warns the agent not to wreck the host. *)
       sandbox_root = Some working_dir;
     }
   in
 
   Log.f "[squad] goal: %s" goal;
   Log.f "[squad] working_dir: %s" working_dir;
-  Log.f "[squad] max_iters: %d (fullstack/qa loop cap)" !max_iters;
+  Log.f "[squad] max_iters: %d (engineer/reviewer loop)" !max_iters;
+  if !resume then Log.f "[squad] mode: RESUME (reviewer first, then loop)";
 
-  let pm_node =
-    Speedjs.Team.make_pm_node ~role_prompt:product_prompt ()
-  in
-  let design_node =
-    Speedjs.Team.make_design_node ~role_prompt:design_prompt ()
-  in
-  (* Fullstack and QA need real I/O tools to write code, run tests,
-     and inspect results. PM and Design stay pure — they only produce
-     text artifacts that flow into the next role's prompt. *)
-  let dev_tools =
+  let dev_tools_engineer =
     [ Speedjs.Tools.write_file; Speedjs.Tools.view_file; Speedjs.Tools.bash ]
   in
-  let qa_tools =
+  let dev_tools_reviewer =
     [ Speedjs.Tools.view_file; Speedjs.Tools.bash ]
   in
-  let fullstack_node =
-    Speedjs.Team.make_fullstack_node ~extra_tools:dev_tools
-      ~role_prompt:fullstack_prompt ()
+  let engineer_node =
+    Speedjs.Pair.make_engineer_node ~extra_tools:dev_tools_engineer
+      ~role_prompt:engineer_prompt ()
   in
-  let qa_node =
-    Speedjs.Team.make_qa_node ~extra_tools:qa_tools ~role_prompt:qa_prompt ()
+  let reviewer_node =
+    Speedjs.Pair.make_reviewer_node ~extra_tools:dev_tools_reviewer
+      ~role_prompt:reviewer_prompt ()
   in
   let workflow =
     if !resume then
-      (* Skip PM + design. Start with a fresh QA pass on whatever's
-         already on disk; if QA fails, enter the normal fullstack/qa
-         revision loop. *)
-      Speedjs.Topology.Sequence
-        [
-          Speedjs.Topology.Node { name = "qa"; run = qa_node };
-          Speedjs.Topology.Loop_until
-            {
-              cond =
-                (fun (s : Speedjs.Team.t) ->
-                  match s.latest_qa with
-                  | Some r when r.pass -> true
-                  | _ -> s.iteration >= s.max_iterations);
-              body =
-                Speedjs.Topology.Sequence
-                  [
-                    Speedjs.Topology.Node
-                      { name = "fullstack"; run = fullstack_node };
-                    Speedjs.Topology.Node { name = "qa"; run = qa_node };
-                  ];
-              max_iters = None;
-            };
-        ]
+      Speedjs.Pair.make_resume_workflow ~engineer_node ~reviewer_node
     else
-      Speedjs.Team.make_workflow ~pm_node ~design_node ~fullstack_node ~qa_node
+      Speedjs.Pair.make_workflow ~engineer_node ~reviewer_node
   in
 
-  (* In resume mode we don't have prior PM/design artifacts in memory,
-     so stub them with placeholders that QA / fullstack will see. The
-     real source of truth is the files on disk — both roles read them
-     via view_file / bash anyway. *)
   let initial =
-    let s0 = Speedjs.Team.initial ~goal ~working_dir ~max_iterations:!max_iters in
-    if !resume then
-      let stub author note =
-        Some
-          ({ author; content = note; iteration = 0 }
-            : Speedjs.Team.artifact)
-      in
-      {
-        s0 with
-        spec =
-          stub "(resume)"
-            (Printf.sprintf
-               "PRIOR SPEC NOT PERSISTED — review against the original \
-                goal and the existing files at %s. Goal: %s"
-               working_dir goal);
-        design =
-          stub "(resume)"
-            "PRIOR DESIGN NOT PERSISTED — verify the existing layout \
-             on disk matches the goal.";
-        implementation =
-          stub "(resume — existing on disk)"
-            (Printf.sprintf
-               "Existing project at %s. Read it via view_file / bash."
-               working_dir);
-      }
-    else s0
+    Speedjs.Pair.initial ~goal ~working_dir ~max_iterations:!max_iters
   in
 
   let final =
     Speedjs.Runtime.install
       ~tools:
         ([
-           Speedjs.Team.submit_spec_tool;
-           Speedjs.Team.submit_design_tool;
-           Speedjs.Team.submit_implementation_tool;
-           Speedjs.Team.submit_qa_report_tool;
+           Speedjs.Pair.submit_implementation_tool;
+           Speedjs.Pair.submit_qa_report_tool;
          ]
-        @ dev_tools)
+        @ dev_tools_engineer)
       ~config:runtime_config
       (fun () ->
         Speedjs.Topology.install Speedjs.Topology.direct (fun () ->
             Speedjs.Topology.run workflow initial))
   in
 
-  Speedjs.Team.print_full final;
+  Speedjs.Pair.print_full final;
 
   let summary =
     Printf.sprintf

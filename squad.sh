@@ -39,9 +39,9 @@ echo "→ working_dir: $WORKING_DIR  (real code lives here)"
 echo "→ goal:        $GOAL"
 echo "→ max_iters:   $MAX_ITERS  (fullstack/qa retry cap)"
 if [ -n "$RESUME_FLAG" ]; then
-  echo "→ team:        (RESUME) qa → loop(fullstack ↔ qa)"
+  echo "→ pair:        (RESUME) reviewer → loop(engineer ↔ reviewer)"
 else
-  echo "→ team:        product → design → (fullstack ↔ qa)"
+  echo "→ pair:        engineer ↔ reviewer  (build/review loop)"
 fi
 echo
 
