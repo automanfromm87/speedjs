@@ -18,6 +18,7 @@ type cost_state = Types.cost_state = {
   mutable calls : int;
   mutable steps : int;
   mutable tool_calls : int;
+  mutable subagent_depth : int;
   mutable start_time : float;
   mu : Mutex.t;
 }

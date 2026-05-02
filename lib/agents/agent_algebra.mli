@@ -34,10 +34,17 @@ val base :
   ?max_iters:int ->
   unit ->
   t
-(** A leaf agent — one [Agent.run] invocation. Tools default to the
-    standard CLI tool set; system_prompt defaults to
-    [Agent.default_system_prompt]; max_iters defaults to
-    [Agent.default_max_iterations]. *)
+(** A leaf agent — one [Agent.run] invocation.
+
+    [?tools] defaults to the EMPTY list. The library does not pull
+    in a "standard tool set" implicitly because the algebra is
+    library code; [bin/main.ml] / [bin/algebra_demo.ml] / your own
+    CLI is responsible for picking the tool surface. Pass
+    [Tools.all] (or the result of [Setup.build_tools]) explicitly
+    when you want them.
+
+    [?system_prompt] / [?system_blocks] / [?max_iters] fall through
+    to [Agent.run]'s defaults when omitted. *)
 
 (** {1 Combinators} *)
 
@@ -58,11 +65,18 @@ val with_skill : string -> t -> t
     agent decide which to load. *)
 
 val replicate : int -> t -> t
-(** Spawn [n] independent runs of the agent on the SAME input, one per
-    OCaml [Domain]. Output is the concatenation of results, ordered by
-    spawn index. Use for ensemble sampling or speculative execution.
-    Children inherit the parent governor and share the parent
-    cost_state (same semantics as [parallel_delegate]). *)
+(** Run [n] copies of the agent on the SAME input. Output is the
+    concatenation of results, ordered by index.
+
+    {b Implementation status (v0):} SEQUENTIAL — runs are executed
+    one after another in the same Domain. The contract still says
+    "n independent runs"; v1 will switch this to a Domain-based
+    fan-out using [Setup.build_child_stack]'s shared cost_state +
+    forked tracer wiring (same as [parallel_delegate]). The change
+    will be observable in wall time and trace structure but not in
+    the value type. Until then, [replicate] is mostly useful for
+    {e ensemble sampling under retry} (e.g. paired with
+    [with_retry]), not for parallel speedup. *)
 
 val pipe : t -> t -> t
 (** [pipe a b]: feed [a]'s output as [b]'s input. If [a] errors, [b] is

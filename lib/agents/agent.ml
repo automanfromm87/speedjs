@@ -166,36 +166,47 @@ let run_until_terminal_tool ?(max_iterations = default_max_iterations)
     any pending ask_user tool_use). *)
 let run_session ?max_iterations ?system_prompt ?system_blocks ~messages
     ~tools () : session_result =
-  let ctx_of_messages msgs =
-    let conv =
-      match Conversation.of_messages msgs with
-      | Ok c -> c
-      | Error err ->
-          failwith ("run_session: malformed input messages — " ^ err)
-    in
-    Context.empty
-    |> Context.with_tools tools
-    |> Context.apply_system
-         ~system_prompt:
-           (Option.value system_prompt ~default:default_system_prompt)
-         ?system_blocks
-    |> Context.with_conversation conv
-  in
   let final_messages ctx =
     Conversation.to_messages (Context.conversation ctx)
   in
-  try
-    match run_loop ?max_iterations ~ctx:(ctx_of_messages messages) () with
-    | Ok (answer, ctx) ->
-        Outcome_done { answer; final_messages = final_messages ctx }
-    | Error (reason, ctx) ->
-        Outcome_failed { reason; messages = final_messages ctx }
-  with Wait_for_user { tool_use_id; question; ctx_so_far } ->
-    Outcome_waiting
-      {
-        tool_use_id;
-        question;
-        messages = final_messages ctx_so_far;
-      }
+  (* A persisted session file (or memory blob) can be corrupt — strict
+     alternation broken, dangling tool_uses without matching results,
+     etc. Return [Outcome_failed] with a typed [Plan_invalid] instead
+     of [failwith]'ing — callers can recover (delete + restart) rather
+     than the whole process crashing. *)
+  match Conversation.of_messages messages with
+  | Error err ->
+      Outcome_failed
+        {
+          reason =
+            Plan_invalid
+              ("run_session: malformed input messages — " ^ err);
+          messages;
+        }
+  | Ok conv ->
+      let ctx =
+        Context.empty
+        |> Context.with_tools tools
+        |> Context.apply_system
+             ~system_prompt:
+               (Option.value system_prompt
+                  ~default:default_system_prompt)
+             ?system_blocks
+        |> Context.with_conversation conv
+      in
+      (try
+         match run_loop ?max_iterations ~ctx () with
+         | Ok (answer, ctx) ->
+             Outcome_done
+               { answer; final_messages = final_messages ctx }
+         | Error (reason, ctx) ->
+             Outcome_failed { reason; messages = final_messages ctx }
+       with Wait_for_user { tool_use_id; question; ctx_so_far } ->
+         Outcome_waiting
+           {
+             tool_use_id;
+             question;
+             messages = final_messages ctx_so_far;
+           })
   (* [Governor.Governor_aborted] escapes through to the top-level
      invoker, which catches via [Protection.catch_protection_errors]. *)

@@ -51,9 +51,16 @@ let require_absolute_path ~field path =
     (stdout first, then stderr) deadlocks on stderr-heavy commands
     that fill the stderr pipe before stdout closes. *)
 let run_with_timeout ~timeout_sec ~cmd =
-  let stdin_r, _stdin_w = Unix.pipe () in
+  let stdin_r, stdin_w = Unix.pipe () in
   let stdout_r, stdout_w = Unix.pipe () in
   let stderr_r, stderr_w = Unix.pipe () in
+  (* close-on-exec on every parent-only fd: [stdout_r] / [stderr_r]
+     aren't passed to the child, and [stdin_w] is the WRITE end of
+     a pipe whose read end IS the child's stdin — if the child
+     inherits a copy of [stdin_w] as a spare fd, the pipe still has
+     a writer when it tries to read, so [cat] / [sort] never see
+     EOF. Marking close-on-exec ensures all three close at execve. *)
+  Unix.set_close_on_exec stdin_w;
   Unix.set_close_on_exec stdout_r;
   Unix.set_close_on_exec stderr_r;
   let pid =
@@ -64,6 +71,7 @@ let run_with_timeout ~timeout_sec ~cmd =
   Unix.close stdin_r;
   Unix.close stdout_w;
   Unix.close stderr_w;
+  Unix.close stdin_w;
   let out_buf = Buffer.create 4096 in
   let err_buf = Buffer.create 4096 in
   let chunk = Bytes.create 4096 in

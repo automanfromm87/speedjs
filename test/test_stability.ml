@@ -180,10 +180,33 @@ let test_run_with_timeout_drains_stderr_concurrently () =
         deadlock on 200KB stderr)"
        elapsed)
 
+(* Regression: a command that reads stdin (cat, sort, ...) must see
+   EOF immediately and complete, not block forever waiting for input
+   we never send. The old impl created the stdin pipe but never
+   closed the parent's WRITE end, so cat hung until run_with_timeout
+   killed it on timeout. *)
+let test_run_with_timeout_closes_stdin_eof () =
+  let start = Unix.gettimeofday () in
+  let result = Tools.run_with_timeout ~timeout_sec:5 ~cmd:"cat" in
+  let elapsed = Unix.gettimeofday () -. start in
+  (match result with
+  | Ok body -> assert (body = "(no output)" || body = "")
+  | Error msg ->
+      failwith
+        (Printf.sprintf "cat with no stdin should exit cleanly, got: %s"
+           msg));
+  assert (elapsed < 1.0);
+  print_endline
+    (Printf.sprintf
+       "✓ run_with_timeout: child sees stdin EOF immediately (cat \
+        completed in %.3fs, not 5s timeout)"
+       elapsed)
+
 let run () =
   test_curl_max_time_caps_transfer ();
   test_stream_first_byte_timeout ();
   test_stream_idle_timeout ();
   test_mcp_read_timeout ();
   test_tool_handler_with_timeout_aborts_slow_tool ();
-  test_run_with_timeout_drains_stderr_concurrently ()
+  test_run_with_timeout_drains_stderr_concurrently ();
+  test_run_with_timeout_closes_stdin_eof ()

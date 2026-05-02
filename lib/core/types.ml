@@ -347,6 +347,13 @@ type cost_state = {
      reads + increments these counters under [mu]. *)
   mutable steps : int;
   mutable tool_calls : int;
+  mutable subagent_depth : int;
+      (** Recursion depth across the WHOLE run, including child
+          Domains. Lives here so [Governor.max_subagent_depth] is a
+          true global cap — a parallel sub-agent that internally
+          delegates again increments the SAME counter the parent
+          decremented from, instead of starting fresh from 0 in its
+          own Domain (which would silently bypass the cap). *)
   mutable start_time : float;
       (** Wall-clock origin for [Governor.max_wall_time_sec]. Set
           ONCE at the outermost [Runtime.install]; child Domains
@@ -371,6 +378,7 @@ let new_cost_state () =
     calls = 0;
     steps = 0;
     tool_calls = 0;
+    subagent_depth = 0;
     start_time = 0.0;  (* unanchored; first Governor anchors *)
     mu = Mutex.create ();
   }
@@ -386,6 +394,50 @@ let cost_state_inc_tool_call (cost : cost_state) =
   Mutex.lock cost.mu;
   cost.tool_calls <- cost.tool_calls + 1;
   Mutex.unlock cost.mu
+
+let cost_state_inc_depth (cost : cost_state) =
+  Mutex.lock cost.mu;
+  cost.subagent_depth <- cost.subagent_depth + 1;
+  Mutex.unlock cost.mu
+
+let cost_state_dec_depth (cost : cost_state) =
+  Mutex.lock cost.mu;
+  cost.subagent_depth <- max 0 (cost.subagent_depth - 1);
+  Mutex.unlock cost.mu
+
+(** Mutex'd snapshot of the read-heavy fields. Use this when computing
+    a cost / reading multiple counters consistently — the underlying
+    fields are mutated under [mu] so a partial read could otherwise
+    see torn values across the multi-field arithmetic. *)
+type cost_snapshot = {
+  s_input_tokens : int;
+  s_output_tokens : int;
+  s_cache_creation : int;
+  s_cache_read : int;
+  s_calls : int;
+  s_steps : int;
+  s_tool_calls : int;
+  s_subagent_depth : int;
+  s_start_time : float;
+}
+
+let cost_state_snapshot (cost : cost_state) : cost_snapshot =
+  Mutex.lock cost.mu;
+  let s =
+    {
+      s_input_tokens = cost.input_tokens;
+      s_output_tokens = cost.output_tokens;
+      s_cache_creation = cost.cache_creation_tokens;
+      s_cache_read = cost.cache_read_tokens;
+      s_calls = cost.calls;
+      s_steps = cost.steps;
+      s_tool_calls = cost.tool_calls;
+      s_subagent_depth = cost.subagent_depth;
+      s_start_time = cost.start_time;
+    }
+  in
+  Mutex.unlock cost.mu;
+  s
 
 (** Mutex-guarded accumulation. Use this from [Llm_handler.with_cost_tracking]
     so parallel sub-agents (which share the parent cost_state) don't race. *)

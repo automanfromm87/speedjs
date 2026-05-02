@@ -70,10 +70,19 @@ let build_tools ~mcp_tools ~skill_tools
     ~(runtime_config : Speedjs.Runtime.config) :
     Speedjs.Types.tool_def list * Speedjs.Types.tool_def list =
   let base = Speedjs.Tools.all @ mcp_tools @ skill_tools in
-  let serial_delegate =
-    Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:base
+  (* Hard mode-gating at the wiring layer. Sub-agents see only tools
+     whose [allowed_modes] include [Subagent] — drops [ask_user]
+     (Wait_for_user would surface a tool_use_id from the wrong
+     conversation), [parallel_delegate] (prevents recursive fan-out),
+     and any future [Executor]-only tools. The Tools / MCP / Skill
+     surfaces still go through the same filter so opt-outs propagate. *)
+  let subagent_base =
+    Speedjs.Types.tools_for_mode Speedjs.Types.Subagent base
   in
-  let subagent_tools = base @ [ serial_delegate ] in
+  let serial_delegate =
+    Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:subagent_base
+  in
+  let subagent_tools = subagent_base @ [ serial_delegate ] in
   let build_child_stack ~prefix ~child_cost:_ thunk =
     let initial_parent_id =
       Speedjs.Trace.current_parent runtime_config.tracer
@@ -109,7 +118,16 @@ let build_tools ~mcp_tools ~skill_tools
       ~tools_for_subagent:subagent_tools ~build_child_stack
       ~parent_cost:runtime_config.cost
   in
-  (subagent_tools, subagent_tools @ [ parallel_delegate ])
+  (* Parent surface is the [Executor] mode: full base + meta tools.
+     The base list is already what the standard tools register; just
+     add the two delegate tools. Filter through tools_for_mode so any
+     tool that opts out of [Executor] (none currently, but enforces
+     the contract) is dropped here too. *)
+  let parent_tools =
+    Speedjs.Types.tools_for_mode Speedjs.Types.Executor
+      (base @ [ serial_delegate; parallel_delegate ])
+  in
+  (subagent_tools, parent_tools)
 
 (** Build the list of system-prompt blocks contributed by enabled
     extensions. Currently just the skill index (when skills are

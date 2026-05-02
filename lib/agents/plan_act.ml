@@ -142,13 +142,24 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
   in
   (* If [prior_messages] ends with a dangling submit_task_result tool_use
      (executor memory across tasks), close it by merging a synthetic
-     Tool_result with the new task text into a single User turn. *)
-  let conv =
-    match Conversation.of_messages prior_messages with
-    | Ok c -> c
-    | Error msg ->
-        failwith ("run_for_task: malformed prior_messages — " ^ msg)
-  in
+     Tool_result with the new task text into a single User turn.
+
+     If the prior history is corrupt (persisted memory was hand-edited
+     or written by an older incompatible version), surface as a
+     [Task_run_failed] outcome instead of crashing — the orchestrator
+     can decide to drop the memory and replan rather than tear the
+     whole process down. *)
+  match Conversation.of_messages prior_messages with
+  | Error msg ->
+      Task_run_failed
+        {
+          reason =
+            Plan_invalid
+              ("run_for_task: malformed prior_messages — " ^ msg);
+          messages = prior_messages;
+        }
+  | Ok initial_conv ->
+  let conv = initial_conv in
   let conv =
     if Conversation.is_dangling conv then
       Conversation.close_dangling_with_ack

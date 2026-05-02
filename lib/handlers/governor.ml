@@ -130,23 +130,17 @@ exception Governor_aborted of {
 (* ===== Internal state ===== *)
 
 type state = {
-  mutable subagent_depth : int;
-      (** Recursion depth (NOT concurrent sibling count). Parent emits
-          ONE [Subagent_entered] per delegate / parallel_delegate
-          tool call (parallel fan-out of N children is still depth
-          +1, not depth +N). Cross-Domain children's own recursive
-          delegates increment their own depth. *)
   clock : unit -> float;
   cost : cost_state;
-      (** [cost.steps] / [cost.tool_calls] / [cost.input_tokens] /
-          [cost.start_time] all live HERE — shared across all Domains
-          via [cost_state]'s mutex — so [max_steps] /
-          [max_tool_calls] / [max_cost_usd] / [max_wall_time_sec]
-          are GLOBAL caps, not per-Domain. *)
+      (** All cumulative counters — steps / tool_calls / tokens /
+          subagent_depth / start_time — live HERE, shared across all
+          Domains via [cost_state]'s mutex. [max_steps] /
+          [max_tool_calls] / [max_cost_usd] / [max_wall_time_sec] /
+          [max_subagent_depth] are therefore GLOBAL caps. *)
   recent_tool_sigs : string Queue.t;
-      (** Death-loop detection is per-Domain too: each child's
-          repetition is detected on its own. Cross-Domain death-loops
-          are a different signal we don't model yet. *)
+      (** Death-loop detection is per-Domain: each child's repetition
+          is detected on its own. Cross-Domain death-loops are a
+          different signal we don't model yet. *)
 }
 
 let make_state ~cost ~clock =
@@ -161,7 +155,6 @@ let make_state ~cost ~clock =
     Mutex.unlock cost.mu
   end;
   {
-    subagent_depth = 0;
     clock;
     cost;
     recent_tool_sigs = Queue.create ();
@@ -172,51 +165,68 @@ let abort ~limit ~reason =
 
 (* ===== Limit checks ===== *)
 
+(* All read paths take a single locked snapshot per check so the
+   numbers reported are consistent — multi-field arithmetic (cost_usd
+   over 4 token counters) won't see a torn write under concurrent
+   Domain mutators. *)
 let check_steps state limits =
   match limits.Limits.max_steps with
-  | Some m when state.cost.steps > m ->
-      abort ~limit:"max_steps"
-        ~reason:
-          (Printf.sprintf "%d steps exceeded cap %d" state.cost.steps m)
-  | _ -> ()
+  | None -> ()
+  | Some m ->
+      let s = Types.cost_state_snapshot state.cost in
+      if s.s_steps > m then
+        abort ~limit:"max_steps"
+          ~reason:(Printf.sprintf "%d steps exceeded cap %d" s.s_steps m)
 
 let check_wall_time state limits =
   match limits.Limits.max_wall_time_sec with
+  | None -> ()
   | Some m ->
-      let elapsed = state.clock () -. state.cost.start_time in
+      let s = Types.cost_state_snapshot state.cost in
+      let elapsed = state.clock () -. s.s_start_time in
       if elapsed > m then
         abort ~limit:"max_wall_time"
           ~reason:
             (Printf.sprintf "%.1fs elapsed exceeded cap %.0fs" elapsed m)
-  | None -> ()
 
 let check_cost state limits =
   match limits.Limits.max_cost_usd with
+  | None -> ()
   | Some m ->
-      let used = Types.cost_usd state.cost in
+      let s = Types.cost_state_snapshot state.cost in
+      let used =
+        (float_of_int s.s_input_tokens *. Types.price_input_per_m
+        +. float_of_int s.s_output_tokens *. Types.price_output_per_m
+        +. float_of_int s.s_cache_creation *. Types.price_cache_write_per_m
+        +. float_of_int s.s_cache_read *. Types.price_cache_read_per_m)
+        /. 1_000_000.0
+      in
       if used > m then
         abort ~limit:"max_cost"
           ~reason:
             (Printf.sprintf "$%.4f used exceeded cap $%.4f" used m)
-  | None -> ()
 
 let check_tool_calls state limits =
   match limits.Limits.max_tool_calls with
-  | Some m when state.cost.tool_calls > m ->
-      abort ~limit:"max_tool_calls"
-        ~reason:
-          (Printf.sprintf "%d tool calls exceeded cap %d"
-             state.cost.tool_calls m)
-  | _ -> ()
+  | None -> ()
+  | Some m ->
+      let s = Types.cost_state_snapshot state.cost in
+      if s.s_tool_calls > m then
+        abort ~limit:"max_tool_calls"
+          ~reason:
+            (Printf.sprintf "%d tool calls exceeded cap %d"
+               s.s_tool_calls m)
 
 let check_depth state limits =
   match limits.Limits.max_subagent_depth with
-  | Some m when state.subagent_depth > m ->
-      abort ~limit:"max_subagent_depth"
-        ~reason:
-          (Printf.sprintf "sub-agent depth %d exceeded cap %d"
-             state.subagent_depth m)
-  | _ -> ()
+  | None -> ()
+  | Some m ->
+      let s = Types.cost_state_snapshot state.cost in
+      if s.s_subagent_depth > m then
+        abort ~limit:"max_subagent_depth"
+          ~reason:
+            (Printf.sprintf "sub-agent depth %d exceeded cap %d"
+               s.s_subagent_depth m)
 
 (** Death-loop detection: track the most recent N tool signatures; if
     the queue is full AND every entry is identical, abort. *)
@@ -273,10 +283,10 @@ let observe state limits event =
          decide on action. *)
       ()
   | Event.Subagent_entered ->
-      state.subagent_depth <- state.subagent_depth + 1;
+      Types.cost_state_inc_depth state.cost;
       check_depth state limits
   | Event.Subagent_exited ->
-      state.subagent_depth <- max 0 (state.subagent_depth - 1)
+      Types.cost_state_dec_depth state.cost
 
 (** Install the Governor effect handler. Catches [Tick] events from the
     inner handlers / agents, observes them against [limits], and raises
