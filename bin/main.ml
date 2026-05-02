@@ -21,8 +21,6 @@ let () =
      time, not at call time). *)
   let mcp_tools = Setup.load_mcp_tools args in
   let skill_index, skill_tools = Setup.load_skills args in
-  let _subagent_tools, tools = Setup.build_tools ~mcp_tools ~skill_tools in
-  let system_blocks = Setup.build_system_blocks ~skill_index in
   let cost = Speedjs.Handlers.new_cost_state () in
 
   if not quiet then
@@ -31,8 +29,17 @@ let () =
 
   let on_log = if quiet then fun _ -> () else Log.line in
   let on_text_delta = if stream then Log.str else fun _ -> () in
+  (* Build runtime_config FIRST so parallel_delegate (constructed in
+     build_tools) can close over it to spawn child stacks. *)
+  let runtime_config =
+    Setup.runtime_config_of_args args ~model ~cost ~on_log ~on_text_delta
+  in
+  let _subagent_tools, tools =
+    Setup.build_tools ~mcp_tools ~skill_tools ~runtime_config
+  in
+  let system_blocks = Setup.build_system_blocks ~skill_index in
   let run_with_runtime thunk =
-    Setup.make_runtime args ~tools ~model ~cost ~on_log ~on_text_delta thunk
+    Speedjs.Runtime.install ~tools ~config:runtime_config thunk
   in
 
   let exit_code =

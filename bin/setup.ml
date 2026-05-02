@@ -63,15 +63,38 @@ let load_skills (args : Args.t) :
       (Speedjs.Skill.render_index loaded, tool)
 
 (** Build the (subagent_tools, parent_tools) pair.
-    Sub-agent tools = built-ins + MCP + skill tool (NO delegate, prevents
-    infinite recursion). Parent tools = sub-agent tools + delegate. *)
-let build_tools ~mcp_tools ~skill_tools :
+    Sub-agent tools = built-ins + MCP + skill tool + serial delegate
+    (NO parallel_delegate, prevents unbounded fan-out).
+    Parent tools = sub-agent tools + parallel_delegate. *)
+let build_tools ~mcp_tools ~skill_tools
+    ~(runtime_config : Speedjs.Runtime.config) :
     Speedjs.Types.tool_def list * Speedjs.Types.tool_def list =
-  let subagent_tools = Speedjs.Tools.all @ mcp_tools @ skill_tools in
-  let delegate =
-    Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:subagent_tools
+  let base = Speedjs.Tools.all @ mcp_tools @ skill_tools in
+  let serial_delegate =
+    Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:base
   in
-  (subagent_tools, subagent_tools @ [ delegate ])
+  let subagent_tools = base @ [ serial_delegate ] in
+  let build_child_stack ~prefix ~child_cost thunk =
+    let child_config : Speedjs.Runtime.config =
+      {
+        runtime_config with
+        cost = child_cost;
+        on_log =
+          (fun line ->
+            runtime_config.on_log (Printf.sprintf "[%s] %s" prefix line));
+        on_text_delta = (fun _ -> ());
+        tape_path = None;
+        crash_after = None;
+      }
+    in
+    Speedjs.Runtime.install ~tools:subagent_tools ~config:child_config thunk
+  in
+  let parallel_delegate =
+    Speedjs.Parallel_subagent.make_delegate_tool
+      ~tools_for_subagent:subagent_tools ~build_child_stack
+      ~parent_cost:runtime_config.cost
+  in
+  (subagent_tools, subagent_tools @ [ parallel_delegate ])
 
 (** Build the list of system-prompt blocks contributed by enabled
     extensions. Currently just the skill index (when skills are

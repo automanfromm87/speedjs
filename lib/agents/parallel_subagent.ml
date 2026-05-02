@@ -59,3 +59,129 @@ let make_shared_sink () : shared_sink =
     [shared.sink] with its own prefix. *)
 let with_prefix prefix (sink : string -> unit) : string -> unit =
  fun line -> sink (Printf.sprintf "[%s] %s" prefix line)
+
+(* ===== parallel_delegate tool ===== *)
+
+open Types
+
+let parallel_delegate_name = "parallel_delegate"
+
+(** Build a tool the LLM can call to fan-out N independent tasks into
+    N domains, each with its own freshly-installed handler stack.
+
+    [build_child_stack ~prefix thunk] is the caller's responsibility:
+    it should install LLM / Tool / File / Time / Log handlers inside
+    [thunk] using a child config (separate cost_state, log sink with
+    [prefix], no tape, muted streaming) and run [thunk]. The standard
+    wiring lives in [bin/setup.ml].
+
+    [tools_for_subagent] is the tool list each child sees. By
+    convention it should NOT include [parallel_delegate] itself (to
+    prevent unbounded recursion). *)
+let aggregate_cost_into ~parent ~child =
+  let p : cost_state = parent in
+  let c : cost_state = child in
+  p.input_tokens <- p.input_tokens + c.input_tokens;
+  p.output_tokens <- p.output_tokens + c.output_tokens;
+  p.cache_creation_tokens <-
+    p.cache_creation_tokens + c.cache_creation_tokens;
+  p.cache_read_tokens <- p.cache_read_tokens + c.cache_read_tokens;
+  p.calls <- p.calls + c.calls
+
+let make_delegate_tool
+    ~(tools_for_subagent : tool_def list)
+    ~(build_child_stack :
+       prefix:string -> child_cost:cost_state -> (unit -> string) -> string)
+    ~(parent_cost : cost_state) :
+    tool_def =
+  let parse_tasks (input : Yojson.Safe.t) : (string list, string) result =
+    let open Json_decode in
+    with_object_input input (fun fs ->
+        match List.assoc_opt "tasks" fs with
+        | Some (`List items) ->
+            let strs =
+              List.filter_map
+                (function `String s when s <> "" -> Some s | _ -> None)
+                items
+            in
+            if strs = [] then Error "tasks list must contain at least one non-empty string"
+            else Ok strs
+        | Some _ -> Error "field 'tasks' must be a JSON array of strings"
+        | None -> Error "missing required field 'tasks'")
+  in
+  {
+    idempotent = false;
+    timeout_sec = None;
+    category = "meta";
+    name = parallel_delegate_name;
+    description =
+      "Spawn MULTIPLE independent sub-agents in parallel (each in its \
+       own OS-level domain). Use this when you have N self-contained \
+       tasks that can run concurrently — e.g. researching unrelated \
+       topics, processing independent files. Each sub-agent has its \
+       own fresh message history, runs its own ReAct loop, and returns \
+       its final answer. Results come back in a single concatenated \
+       block ordered by task index. Sub-agents have access to all \
+       tools EXCEPT parallel_delegate itself.";
+    input_schema =
+      `Assoc
+        [
+          ("type", `String "object");
+          ( "properties",
+            `Assoc
+              [
+                ( "tasks",
+                  `Assoc
+                    [
+                      ("type", `String "array");
+                      ( "description",
+                        `String
+                          "Array of self-contained task descriptions. \
+                           Each runs as a separate sub-agent. NO shared \
+                           context between tasks." );
+                      ("items", `Assoc [ ("type", `String "string") ]);
+                    ] );
+              ] );
+          ("required", `List [ `String "tasks" ]);
+        ];
+    handler =
+      (fun input ->
+        match parse_tasks input with
+        | Error msg -> Error msg
+        | Ok tasks ->
+            let n = List.length tasks in
+            Effect.perform
+              (Effects.Log
+                 (Printf.sprintf
+                    "  [parallel_delegate] spawning %d domain(s)" n));
+            let child_costs =
+              Array.init n (fun _ -> new_cost_state ())
+            in
+            let thunks =
+              List.mapi
+                (fun i task () ->
+                  let prefix = Printf.sprintf "sub:%d" i in
+                  let child_cost = child_costs.(i) in
+                  build_child_stack ~prefix ~child_cost (fun () ->
+                      match
+                        Agent.run ~user_query:task
+                          ~tools:tools_for_subagent ()
+                      with
+                      | Ok s -> s
+                      | Error e -> "[ERROR] " ^ agent_error_pp e))
+                tasks
+            in
+            let answers = run thunks in
+            (* Aggregate child costs into parent on the parent thread —
+               no race because all children have joined. *)
+            Array.iter
+              (fun child -> aggregate_cost_into ~parent:parent_cost ~child)
+              child_costs;
+            let combined =
+              answers
+              |> List.mapi (fun i a ->
+                     Printf.sprintf "=== sub:%d ===\n%s" i a)
+              |> String.concat "\n\n"
+            in
+            Ok combined);
+  }
