@@ -24,6 +24,8 @@
   .kind.tool_call   { background: #238636; color: white; }
   .kind.plan_step   { background: #db7d2c; color: white; }
   .kind.agent_spawn { background: #8957e5; color: white; }
+  .kind.phase       { background: #f85149; color: white; }
+  .kind.iteration   { background: #6e7681; color: white; }
   .kind.log         { background: #484f58; color: white; }
   .row.fail { color: #f85149; }
   .row .name { color: #c9d1d9; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
@@ -34,6 +36,8 @@
   .kind-fill-tool_call   { background: #238636; }
   .kind-fill-plan_step   { background: #db7d2c; }
   .kind-fill-agent_spawn { background: #8957e5; }
+  .kind-fill-phase       { background: #f85149; }
+  .kind-fill-iteration   { background: #6e7681; }
   .kind-fill-log         { background: #484f58; }
   .empty { color: #7d8590; text-align: center; padding: 60px; font-style: italic; }
   .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #30363d; }
@@ -116,6 +120,37 @@ function loadText(text) {
       (children[p] ||= []).push(f.id);
     }
   }
+
+  // Inclusive rollup: each frame gets a [total_*] field summing
+  // itself + all descendants. Computed once at load time so renders
+  // are O(visible).
+  const computeRollup = (id) => {
+    const f = byId[id];
+    if (!f) return;
+    let cost = f.cost_delta_usd || 0;
+    let tin = (f.tokens && f.tokens.input) || 0;
+    let tout = (f.tokens && f.tokens.output) || 0;
+    let llm_count = (f.kind === "llm_call") ? 1 : 0;
+    let tool_count = (f.kind === "tool_call") ? 1 : 0;
+    let fail_count = f.ok ? 0 : 1;
+    for (const c of children[id] || []) {
+      computeRollup(c);
+      const cf = byId[c];
+      cost += cf.total_cost_usd;
+      tin += cf.total_tokens_in;
+      tout += cf.total_tokens_out;
+      llm_count += cf.total_llm;
+      tool_count += cf.total_tool;
+      fail_count += cf.total_fail;
+    }
+    f.total_cost_usd = cost;
+    f.total_tokens_in = tin;
+    f.total_tokens_out = tout;
+    f.total_llm = llm_count;
+    f.total_tool = tool_count;
+    f.total_fail = fail_count;
+  };
+  for (const id of roots) computeRollup(id);
 
   minTime = Math.min(...frames.map(f => f.started_at));
   maxTime = Math.max(...frames.map(f => f.ended_at));
@@ -219,14 +254,23 @@ function renderNode(id, depth, parent) {
   const stats = document.createElement("span");
   stats.className = "stats";
   const ms = (f.duration_ms || 0).toFixed(0);
+  const hasKids = (children[id] || []).length > 0;
   let s = ` ${ms}ms`;
-  if (f.tokens && f.tokens.input + f.tokens.output > 0) {
-    s += ` ${f.tokens.input}↓${f.tokens.output}↑`;
+  if (hasKids) {
+    // Inclusive rollup view for parents: show subtree totals so
+    // glance answers "how much did this phase / task cost?".
+    s += ` Σ$${f.total_cost_usd.toFixed(4)}`;
+    s += ` ${f.total_llm}llm/${f.total_tool}tool`;
+    if (f.total_fail > 0) s += ` ✗${f.total_fail}`;
+  } else {
+    if (f.tokens && f.tokens.input + f.tokens.output > 0) {
+      s += ` ${f.tokens.input}↓${f.tokens.output}↑`;
+    }
+    if (f.cost_delta_usd > 0) {
+      s += ` $${f.cost_delta_usd.toFixed(4)}`;
+    }
+    if (!f.ok) s += " ✗";
   }
-  if (f.cost_delta_usd > 0) {
-    s += ` $${f.cost_delta_usd.toFixed(4)}`;
-  }
-  if (!f.ok) s += " ✗";
   stats.textContent = s;
   row.appendChild(stats);
 
@@ -288,9 +332,16 @@ function renderDetails() {
     <div>ended: &nbsp;${new Date(f.ended_at * 1000).toISOString().split("T")[1].slice(0, -1)}</div>
     <div>duration: <span class="badge">${f.duration_ms.toFixed(1)} ms</span></div>
 
-    <h3>cost / tokens</h3>
+    <h3>cost / tokens (own)</h3>
     <div>cost: ${cost}</div>
     <div>tokens: input=${tk.input || 0}, output=${tk.output || 0}, cache_r=${tk.cache_read || 0}, cache_w=${tk.cache_write || 0}</div>
+
+    ${(children[selectedId] || []).length > 0 ? `
+    <h3>subtree rollup (incl. descendants)</h3>
+    <div>total cost: $${f.total_cost_usd.toFixed(6)}</div>
+    <div>total tokens: input=${f.total_tokens_in}, output=${f.total_tokens_out}</div>
+    <div>llm calls in subtree: ${f.total_llm} | tool calls: ${f.total_tool} | failures: ${f.total_fail}</div>
+    ` : ""}
 
     <h3>input summary</h3>
     <pre>${escape(f.input_summary || "(empty)")}</pre>
