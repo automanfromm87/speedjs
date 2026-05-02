@@ -69,17 +69,16 @@ let with_validation (inner : t) : t =
                   Anthropic): %s"
                  msg)))
 
-(** Update [cost] with this call's usage on success. *)
+(** Update [cost] with this call's usage on success. Goes through
+    [cost_state_add] so parallel sub-agents (which share the parent
+    cost_state) don't race when they finish LLM calls concurrently. *)
 let with_cost_tracking ~(cost : cost_state) (inner : t) : t =
  fun args ->
   let response = inner args in
-  cost.input_tokens <- cost.input_tokens + response.usage.input_tokens;
-  cost.output_tokens <- cost.output_tokens + response.usage.output_tokens;
-  cost.cache_creation_tokens <-
-    cost.cache_creation_tokens + response.usage.cache_creation_input_tokens;
-  cost.cache_read_tokens <-
-    cost.cache_read_tokens + response.usage.cache_read_input_tokens;
-  cost.calls <- cost.calls + 1;
+  cost_state_add cost ~input_tokens:response.usage.input_tokens
+    ~output_tokens:response.usage.output_tokens
+    ~cache_creation:response.usage.cache_creation_input_tokens
+    ~cache_read:response.usage.cache_read_input_tokens;
   response
 
 (** Wrap each call in a [Trace] span. Captures usage tokens + per-call

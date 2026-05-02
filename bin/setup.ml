@@ -74,23 +74,25 @@ let build_tools ~mcp_tools ~skill_tools
     Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:base
   in
   let subagent_tools = base @ [ serial_delegate ] in
-  let build_child_stack ~prefix ~child_cost thunk =
-    (* Capture the parent's current frame id BEFORE Domain.spawn — this
-       runs in the parent Domain so [Trace.current ()] still resolves to
-       the parent's tracer. The forked child tracer is then seeded with
-       it, so the child's first emitted frame parents back to the call
-       site that spawned it. Each Domain gets its own stack to avoid
-       races; emit sink is shared (Mutex-guarded inside Trace). *)
+  let build_child_stack ~prefix ~child_cost:_ thunk =
     let initial_parent_id =
       Speedjs.Trace.current_parent runtime_config.tracer
     in
     let child_tracer =
       Speedjs.Trace.fork ~parent:runtime_config.tracer ~initial_parent_id ()
     in
+    (* Share the PARENT's cost_state so [max_cost_usd] / [max_steps] caps
+       account for child spend in real time, not just after Domain.join.
+       [cost_state_add] is mutex-guarded so concurrent LLM finishes
+       from multiple Domains don't race on the counters. [child_cost]
+       is ignored and kept only to preserve the existing signature
+       [Parallel_subagent.make_delegate_tool] expects.
+
+       [tracer] is forked per-Domain so each Domain owns its push/pop
+       stack (avoiding races) but writes to the parent's emit sink. *)
     let child_config : Speedjs.Runtime.config =
       {
         runtime_config with
-        cost = child_cost;
         on_log =
           (fun line ->
             runtime_config.on_log (Printf.sprintf "[%s] %s" prefix line));

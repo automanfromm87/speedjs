@@ -155,15 +155,21 @@ let make_delegate_tool
               (Effects.Log
                  (Printf.sprintf
                     "  [parallel_delegate] spawning %d domain(s)" n));
-            let child_costs =
-              Array.init n (fun _ -> new_cost_state ())
+            (* Emit one Subagent_entered tick per child BEFORE spawn so
+               the parent governor's [max_subagent_depth] check fires
+               on the parent fiber (effects don't reach Domains). *)
+            let safe_tick ev =
+              try Effect.perform (Governor.Tick ev) with _ -> ()
             in
+            for _ = 1 to n do
+              safe_tick Subagent_entered
+            done;
             let thunks =
               List.mapi
                 (fun i task () ->
                   let prefix = Printf.sprintf "sub:%d" i in
-                  let child_cost = child_costs.(i) in
-                  build_child_stack ~prefix ~child_cost (fun () ->
+                  build_child_stack ~prefix
+                    ~child_cost:parent_cost (fun () ->
                       let capture (s : string) : Trace.capture_result =
                         let ok =
                           not (String.starts_with ~prefix:"[ERROR]" s)
@@ -183,12 +189,14 @@ let make_delegate_tool
                           | Error e -> "[ERROR] " ^ agent_error_pp e)))
                 tasks
             in
-            let answers = run thunks in
-            (* Aggregate child costs into parent on the parent thread —
-               no race because all children have joined. *)
-            Array.iter
-              (fun child -> aggregate_cost_into ~parent:parent_cost ~child)
-              child_costs;
+            let answers =
+              Fun.protect
+                ~finally:(fun () ->
+                  for _ = 1 to n do
+                    safe_tick Subagent_exited
+                  done)
+                (fun () -> run thunks)
+            in
             let combined =
               answers
               |> List.mapi (fun i a ->

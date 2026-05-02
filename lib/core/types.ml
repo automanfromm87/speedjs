@@ -267,6 +267,12 @@ type cost_state = {
   mutable cache_creation_tokens : int;
   mutable cache_read_tokens : int;
   mutable calls : int;
+  mu : Mutex.t;
+      (** Guards mutations from parallel sub-agents, which all share
+          the parent's cost_state so the parent governor sees cumulative
+          spend in real time. Single-Domain runs lock + unlock once per
+          LLM call — a few hundred nanoseconds of overhead, negligible
+          next to the LLM call itself. *)
 }
 
 let new_cost_state () =
@@ -276,7 +282,21 @@ let new_cost_state () =
     cache_creation_tokens = 0;
     cache_read_tokens = 0;
     calls = 0;
+    mu = Mutex.create ();
   }
+
+(** Mutex-guarded accumulation. Use this from [Llm_handler.with_cost_tracking]
+    so parallel sub-agents (which share the parent cost_state) don't race. *)
+let cost_state_add (cost : cost_state)
+    ~input_tokens ~output_tokens ~cache_creation ~cache_read =
+  Mutex.lock cost.mu;
+  cost.input_tokens <- cost.input_tokens + input_tokens;
+  cost.output_tokens <- cost.output_tokens + output_tokens;
+  cost.cache_creation_tokens <-
+    cost.cache_creation_tokens + cache_creation;
+  cost.cache_read_tokens <- cost.cache_read_tokens + cache_read;
+  cost.calls <- cost.calls + 1;
+  Mutex.unlock cost.mu
 
 (* Sonnet 4.5 pricing (USD per 1M tokens). Cache writes cost 1.25x base
    input, cache reads cost 0.1x. Adjust per model. *)
