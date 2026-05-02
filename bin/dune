@@ -1,4 +1,4 @@
 (executables
- (names main debate squad)
- (public_names speedjs debate squad)
+ (names main)
+ (public_names speedjs)
  (libraries speedjs))
