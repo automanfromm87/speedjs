@@ -13,6 +13,24 @@ val default_max_iterations : int
 
 val default_system_prompt : string
 
+(** {1 Control-flow exception policy}
+
+    The two exceptions below are protocol-level interrupts: they
+    suspend the ReAct loop because the caller above the agent (CLI /
+    plan-act orchestrator) needs to act on a synchronous handoff.
+    They are NOT errors. Errors flow as [Result.Error agent_error]
+    through normal returns.
+
+    Rule of thumb: an [exception] in this codebase is reserved for
+    cases where the caller must intercept and resume out-of-band —
+    [Wait_for_user] (suspend until user replies) and
+    [Task_terminal_called] (suspend so the orchestrator can parse
+    structured submit input). Anything that fits "this run failed"
+    should be a typed [agent_error] returned via [Result], not
+    raised. Adding a new exception here requires the same
+    justification.
+*)
+
 (** Raised when the model calls [ask_user]. The agent loop halts
     mid-conversation and the caller (typically [run_session]) catches
     this to return [Outcome_waiting]. *)

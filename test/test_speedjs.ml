@@ -15,5 +15,6 @@ let () =
   Test_e2e.run ();
   Test_parallel.run ();
   Test_agent_algebra.run ();
+  Test_cache_stability.run ();
   Test_stability.run ();
   print_endline "\nAll tests passed.\n"
