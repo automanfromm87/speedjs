@@ -13,5 +13,6 @@ let () =
   Test_governor.run ();
   Test_effects.run ();
   Test_e2e.run ();
+  Test_parallel.run ();
   Test_stability.run ();
   print_endline "\nAll tests passed.\n"
