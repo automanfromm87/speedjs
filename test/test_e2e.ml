@@ -680,9 +680,64 @@ let test_subagent_no_parent_history_leak () =
     "✓ E2E: sub-agent isolation — parent context strings absent in delegate's \
      LLM args"
 
+(* ========================================================================
+   Regression: tool handler performing Effects.Log must reach the Log
+   handler — bites delegate / parallel_delegate which both log from
+   inside their handler. Earlier install order had Log_handler INSIDE
+   Tool_handler, leaving these effects unhandled.
+   ======================================================================== *)
+
+let test_tool_handler_can_perform_log_effect () =
+  let captured = ref [] in
+  let log_chain s = captured := s :: !captured in
+  let logging_tool : tool_def =
+    {
+      idempotent = true;
+      timeout_sec = None;
+      category = "test";
+      name = "log_then_ok";
+      description = "logs a sentinel then returns ok";
+      input_schema = `Assoc [];
+      handler =
+        (fun _ ->
+          Effect.perform (Effects.Log "TOOL-INNER-LOG-MARKER");
+          Ok "done");
+    }
+  in
+  let resp =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          {
+            id = Id.Tool_use_id.of_string "u1";
+            name = "log_then_ok";
+            input = `Assoc [];
+          };
+      ]
+  in
+  let final = mk_resp ~stop_reason:End_turn [ Text "ok" ] in
+  let llm_chain = canned_llm [ resp; final ] in
+  let _ =
+    Llm_handler.install llm_chain (fun () ->
+        File_handler.install File_handler.direct (fun () ->
+            Time_handler.install Time_handler.direct (fun () ->
+                Log_handler.install log_chain (fun () ->
+                    Tool_handler.install
+                      ~tools:[ logging_tool ]
+                      Tool_handler.direct (fun () ->
+                        Agent.run ~user_query:"go" ~tools:[ logging_tool ]
+                          ())))))
+  in
+  let lines = !captured in
+  assert (List.exists (fun s -> Test_helpers.contains s "TOOL-INNER-LOG-MARKER") lines);
+  print_endline
+    "✓ Regression: tool handler's Effect.perform (Log _) reaches \
+     Log_handler when installed outside Tool_handler"
+
 let run () =
   test_plan_act_task_edits_virtual_file ();
   test_sandbox_blocks_tool_outside_root ();
+  test_tool_handler_can_perform_log_effect ();
   test_multi_task_plan_act_chains_filesystem_state ();
   test_recovery_flow_skip_then_continue ();
   test_ask_user_pause_then_resume ();
