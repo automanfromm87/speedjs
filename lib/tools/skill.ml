@@ -279,6 +279,11 @@ let make_load_skill_tool (skills : t list) : Types.tool_def =
        return a short stub — the original body is already in your \
        conversation history.)"
     ~idempotent:true ~timeout_sec:(Some 1.0) ~category:"meta"
+    ~capabilities:[ Read_only ]
+    (* Skills are domain knowledge — Planner / Recovery should be
+       able to load them too (e.g. backend skill before deciding how
+       to decompose a backend task). *)
+    ~allowed_modes:[ Planner; Recovery; Executor; Subagent ]
     ~input_schema:
       (`Assoc
         [

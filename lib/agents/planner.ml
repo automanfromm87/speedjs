@@ -55,6 +55,8 @@ let submit_plan_tool : tool_def =
     idempotent = true;
     timeout_sec = None;
     category = "meta";
+    capabilities = [ Terminal ];
+    allowed_modes = [ Planner ];
     classify_error = default_classify_error;
     name = "submit_plan";
     description =
@@ -186,6 +188,11 @@ let plan ?(system_prompt = default_system_prompt)
        (Printf.sprintf "[planner] decomposing goal: %s"
           (if String.length goal > 80 then String.sub goal 0 80 ^ "..."
            else goal)));
+  (* Hard gate: planner sees only tools whose [allowed_modes] include
+     [Planner]. Mutating / Exec tools are filtered out at the type
+     level — even if the prompt fails to deter, the tool is literally
+     not in the surface presented to the model. *)
+  let research_tools = tools_for_mode Planner research_tools in
   let planner_tools = research_tools @ [ submit_plan_tool ] in
   let initial_messages =
     [
@@ -321,6 +328,8 @@ let submit_recovery_tool : tool_def =
     idempotent = true;
     timeout_sec = None;
     category = "meta";
+    capabilities = [ Terminal ];
+    allowed_modes = [ Recovery ];
     classify_error = default_classify_error;
     name = "submit_recovery";
     description =
@@ -489,6 +498,7 @@ let recover ?(max_iterations = default_planner_max_iter)
       (String.concat "\n" (List.map (fun t -> "  - " ^ t) remaining))
       prior_failures_section cycle_index max_cycles
   in
+  let research_tools = tools_for_mode Recovery research_tools in
   let recovery_tools = research_tools @ [ submit_recovery_tool ] in
   let initial_messages = [ { role = User; content = [ Text body ] } ] in
 

@@ -65,6 +65,39 @@ type llm_response = {
     [Tool_result.is_error]. *)
 type tool_handler_result = (string, string) Result.t
 
+(** Tool semantic capabilities. A tool may have multiple — e.g. [bash]
+    is both [Exec] and [Mutating]; [http_get] is both [Read_only] and
+    [Network]. The set is used to filter the tool surface per
+    [agent_mode] (Planner can't see [Mutating]) and to drive policy
+    middleware (e.g. [Network] tools opt into transient retry by
+    default). *)
+type capability =
+  | Read_only       (** No filesystem / network / subprocess effect. *)
+  | Mutating        (** Writes to filesystem or external state. *)
+  | Exec            (** Spawns subprocess. *)
+  | Network         (** Performs network I/O. *)
+  | Meta            (** Orchestration: spawns sub-agents / loads skills. *)
+  | Pause           (** Synthetic — interrupts the agent loop (ask_user). *)
+  | Terminal        (** Synthetic terminal tool (submit_task_result, etc).
+                        Handler never invoked; intercepted by run_loop. *)
+
+(** Where a tool may be exposed. The runtime filters [tool_def]s by
+    cross-referencing [agent_mode] with the tool's [allowed_modes].
+
+    - [Planner]   : decomposes the user goal. Read-only research only.
+    - [Recovery]  : decides REPLAN/SPLIT/SKIP/ABANDON when a task fails.
+                    Same surface as Planner.
+    - [Executor]  : the per-task ReAct loop. Full surface.
+    - [Subagent]  : delegated focused task. Full surface minus [Meta]
+                    (no recursive delegate, no parallel_delegate). *)
+type agent_mode = Planner | Recovery | Executor | Subagent
+
+let agent_mode_to_string = function
+  | Planner -> "planner"
+  | Recovery -> "recovery"
+  | Executor -> "executor"
+  | Subagent -> "subagent"
+
 type tool_def = {
   name : string;
   description : string;
@@ -83,8 +116,18 @@ type tool_def = {
           [run_with_timeout]). Middleware can also enforce / log against
           it. *)
   category : string;
-      (** Coarse grouping for audit / metrics. Suggested values:
-          ["compute"] | ["file_io"] | ["network"] | ["exec"] | ["meta"]. *)
+      (** Free-form coarse grouping for audit / metrics. The hard
+          gating happens via [capabilities] + [allowed_modes];
+          [category] is just a human-readable hint shown in logs and
+          surfaced through the trace. *)
+  capabilities : capability list;
+      (** What the tool is allowed to do. Used by the runtime to
+          enforce mode-based filtering: a [Planner] never sees a
+          [Mutating] tool even if the prompt fails to gate it. *)
+  allowed_modes : agent_mode list;
+      (** Which agent modes may call this tool. Defaults are derived
+          from [capabilities] in [make_typed_tool] — synthetic tools
+          (terminal, pause, meta) override explicitly. *)
   classify_error : string -> [ `Transient | `Permanent ];
       (** Map a tool's string error to a retryability class.
           [Tool_handler.with_retry] honors [`Transient] (when the tool
@@ -94,6 +137,28 @@ type tool_def = {
           transient failure modes (network calls, subprocesses) override
           via [make_typed_tool ~error_classifier]. *)
 }
+
+(** Default mode allowance from a capability set. [Read_only] and
+    [Network] (also read-only by convention here) are seen by every
+    mode; anything else is restricted to [Executor] / [Subagent].
+    Synthetic kinds ([Pause] / [Terminal] / [Meta]) override
+    explicitly via [make_typed_tool ~allowed_modes]. *)
+let default_modes_for_capabilities (caps : capability list) : agent_mode list =
+  let read_only_only =
+    List.for_all
+      (fun c ->
+        match c with
+        | Read_only | Network -> true
+        | Mutating | Exec | Meta | Pause | Terminal -> false)
+      caps
+  in
+  if read_only_only then [ Planner; Recovery; Executor; Subagent ]
+  else [ Executor; Subagent ]
+
+(** Filter a tool list to those a given mode may use. *)
+let tools_for_mode (mode : agent_mode) (tools : tool_def list) :
+    tool_def list =
+  List.filter (fun t -> List.mem mode t.allowed_modes) tools
 
 (** Build a [tool_def] from a TYPED handler. The decoder owns
     JSON-to-OCaml-value translation; the handler then operates on
@@ -113,6 +178,8 @@ let default_classify_error : string -> [ `Transient | `Permanent ] =
 
 let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
     ?(category = "general")
+    ?(capabilities = [ Read_only ])
+    ?allowed_modes
     ?(classify_error = default_classify_error)
     ~name ~description ~input_schema
     ~(input_decoder : Yojson.Safe.t -> ('input, string) result)
@@ -122,6 +189,11 @@ let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
     | Error e -> Error ("invalid input: " ^ e)
     | Ok parsed -> handler parsed
   in
+  let allowed_modes =
+    match allowed_modes with
+    | Some m -> m
+    | None -> default_modes_for_capabilities capabilities
+  in
   {
     name;
     description;
@@ -130,6 +202,8 @@ let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
     idempotent;
     timeout_sec;
     category;
+    capabilities;
+    allowed_modes;
     classify_error;
   }
 

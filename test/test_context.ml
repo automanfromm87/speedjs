@@ -54,6 +54,8 @@ let test_context_add_tool_appends () =
       idempotent = true;
       timeout_sec = None;
       category = "test";
+      capabilities = [ Speedjs.Types.Read_only ];
+      allowed_modes = [ Planner; Recovery; Executor; Subagent ];
       classify_error = Speedjs.Types.default_classify_error;
       name;
       description = "";

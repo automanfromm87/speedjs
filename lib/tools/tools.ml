@@ -115,6 +115,7 @@ let calculator : tool_def =
       "Evaluate a simple arithmetic expression. Supports +, -, *, /, parens, \
        powers (^). Example: '(15 * 7 + 3) / 2'"
     ~idempotent:true ~timeout_sec:(Some 5.0) ~category:"compute"
+    ~capabilities:[ Read_only ]
     ~input_schema:
       (`Assoc
         [
@@ -196,6 +197,7 @@ let http_get : tool_def =
       "Fetch a URL via HTTP GET and return the response body as text. \
        Truncated to ~8000 chars. Useful for reading web pages or API endpoints."
     ~idempotent:true ~timeout_sec:(Some 15.0) ~category:"network"
+    ~capabilities:[ Read_only; Network ]
     ~classify_error:network_classifier
     ~input_schema:
       (`Assoc
@@ -235,6 +237,7 @@ let current_time : tool_def =
     ~description:
       "Get the current date and time in ISO 8601 format (local time)."
     ~idempotent:true ~timeout_sec:(Some 1.0) ~category:"compute"
+    ~capabilities:[ Read_only ]
     ~input_schema:
       (`Assoc [ ("type", `String "object"); ("properties", `Assoc []) ])
     ~input_decoder:(fun _ -> Ok ())
@@ -270,6 +273,7 @@ let bash : tool_def =
     (* Not idempotent: shell commands often have side effects (mkdir,
        npm install, file writes). Conservative default. *)
     ~idempotent:false ~timeout_sec:(Some 30.0) ~category:"exec"
+    ~capabilities:[ Exec; Mutating ]
     ~classify_error:exec_classifier
     ~input_schema:
       (`Assoc
@@ -325,6 +329,7 @@ let view_file : tool_def =
        view_range [start, end] (1-indexed, inclusive). For directories, \
        lists entries instead. PATH MUST BE ABSOLUTE (starts with /)."
     ~idempotent:true ~timeout_sec:(Some 5.0) ~category:"file_io"
+    ~capabilities:[ Read_only ]
     ~input_schema:
       (`Assoc
         [
@@ -400,6 +405,7 @@ let write_file : tool_def =
        message with byte count. PATH MUST BE ABSOLUTE (starts with /)."
     (* Not idempotent: overwrites file content. *)
     ~idempotent:false ~timeout_sec:(Some 10.0) ~category:"file_io"
+    ~capabilities:[ Mutating ]
     ~input_schema:
       (`Assoc
         [
@@ -449,6 +455,7 @@ let str_replace : tool_def =
        PATH MUST BE ABSOLUTE (starts with /)."
     (* Not idempotent: mutates file. *)
     ~idempotent:false ~timeout_sec:(Some 10.0) ~category:"file_io"
+    ~capabilities:[ Mutating ]
     ~input_schema:
       (`Assoc
         [
@@ -538,6 +545,8 @@ let ask_user : tool_def =
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    capabilities = [ Pause ];
+    allowed_modes = [ Executor; Subagent ];
     classify_error = default_classify_error;
     name = ask_user_name;
     description =

@@ -124,6 +124,8 @@ let test_tool_handler_with_timeout_aborts_slow_tool () =
       idempotent = true;
       timeout_sec = Some 0.1;
       category = "test";
+      capabilities = [ Read_only ];
+      allowed_modes = [ Planner; Recovery; Executor; Subagent ];
       classify_error = default_classify_error;
     }
   in

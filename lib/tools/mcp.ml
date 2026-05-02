@@ -314,7 +314,13 @@ let to_tool_def (conn : t) (json : Yojson.Safe.t) : Types.tool_def =
           idempotent = false;
           timeout_sec = Some 30.0;
           category = "mcp";
-          (* MCP transport already classifies its own transients. *)
+          (* MCP servers can do anything in principle. Conservative
+             classification: assume Mutating + Network so they're
+             gated to Executor / Subagent. Operators can override
+             at the connector layer if they know the server is
+             read-only. *)
+          capabilities = [ Mutating; Network ];
+          allowed_modes = [ Executor; Subagent ];
           classify_error = Types.default_classify_error;
         }
   | _ -> failwith "Mcp.to_tool_def: tool must be JSON object"

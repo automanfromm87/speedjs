@@ -113,6 +113,11 @@ let make_delegate_tool
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    capabilities = [ Meta ];
+    (* Only the Executor (top-level main agent) may fan out — sub-agents
+       can't recursively spawn parallel sub-agents (prevents unbounded
+       fan-out). Planner / Recovery never fan out. *)
+    allowed_modes = [ Executor ];
     classify_error = default_classify_error;
     name = parallel_delegate_name;
     description =

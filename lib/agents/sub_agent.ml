@@ -31,6 +31,10 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    capabilities = [ Meta ];
+    (* Executor + Subagent — chained delegation is allowed up to the
+       depth cap enforced by the parent's Governor. *)
+    allowed_modes = [ Executor; Subagent ];
     classify_error = default_classify_error;
     name = delegate_name;
     description =

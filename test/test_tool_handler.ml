@@ -4,7 +4,10 @@ open Speedjs
 open Types
 
 let mk_test_tool ?(idempotent = false) ?(timeout_sec = None)
-    ?(category = "test") ?(classify_error = default_classify_error)
+    ?(category = "test")
+    ?(capabilities = [ Read_only ])
+    ?(allowed_modes = [ Planner; Recovery; Executor; Subagent ])
+    ?(classify_error = default_classify_error)
     name handler : tool_def =
   {
     name;
@@ -14,6 +17,8 @@ let mk_test_tool ?(idempotent = false) ?(timeout_sec = None)
     idempotent;
     timeout_sec;
     category;
+    capabilities;
+    allowed_modes;
     classify_error;
   }
 
