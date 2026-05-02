@@ -1,4 +1,4 @@
-(executable
- (public_name speedjs)
- (name main)
+(executables
+ (names main debate)
+ (public_names speedjs debate)
  (libraries speedjs))
