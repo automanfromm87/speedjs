@@ -46,6 +46,7 @@ let submit_task_result_tool : tool_def =
     idempotent = true;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = submit_task_result_name;
     description =
       "Submit the FINAL outcome for the current task. Call this exactly \

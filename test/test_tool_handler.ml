@@ -4,7 +4,8 @@ open Speedjs
 open Types
 
 let mk_test_tool ?(idempotent = false) ?(timeout_sec = None)
-    ?(category = "test") name handler : tool_def =
+    ?(category = "test") ?(classify_error = default_classify_error)
+    name handler : tool_def =
   {
     name;
     description = "test tool";
@@ -13,6 +14,7 @@ let mk_test_tool ?(idempotent = false) ?(timeout_sec = None)
     idempotent;
     timeout_sec;
     category;
+    classify_error;
   }
 
 let test_tool_handler_direct_classifies_errors () =

@@ -113,6 +113,7 @@ let make_delegate_tool
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = parallel_delegate_name;
     description =
       "Spawn MULTIPLE independent sub-agents in parallel (each in its \

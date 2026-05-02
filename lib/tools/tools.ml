@@ -154,12 +154,49 @@ let calculator : tool_def =
         Result.map String.trim (read_all_from_proc cmd))
     ()
 
+(* Substring search; cheap enough for short error messages. *)
+let contains_lower haystack needle =
+  let h = String.lowercase_ascii haystack in
+  let nlen = String.length needle in
+  let hlen = String.length h in
+  let rec scan i =
+    if i + nlen > hlen then false
+    else if String.sub h i nlen = needle then true
+    else scan (i + 1)
+  in
+  scan 0
+
+let network_classifier (msg : string) : [ `Transient | `Permanent ] =
+  if contains_lower msg "timeout"
+     || contains_lower msg "timed out"
+     || contains_lower msg "connection refused"
+     || contains_lower msg "connection reset"
+     || contains_lower msg "could not resolve"
+     || contains_lower msg "couldn't resolve"
+     || contains_lower msg "503"
+     || contains_lower msg "502"
+     || contains_lower msg "504"
+     || contains_lower msg "rate limit"
+     || contains_lower msg "too many requests"
+  then `Transient
+  else `Permanent
+
+let exec_classifier (msg : string) : [ `Transient | `Permanent ] =
+  (* Subprocess errors are mostly deterministic (exit codes, missing
+     binaries). Only retry the genuinely-flaky ones. *)
+  if contains_lower msg "interrupted system call"
+     || contains_lower msg "resource temporarily unavailable"
+     || contains_lower msg "text file busy"
+  then `Transient
+  else `Permanent
+
 let http_get : tool_def =
   make_typed_tool ~name:"http_get"
     ~description:
       "Fetch a URL via HTTP GET and return the response body as text. \
        Truncated to ~8000 chars. Useful for reading web pages or API endpoints."
     ~idempotent:true ~timeout_sec:(Some 15.0) ~category:"network"
+    ~classify_error:network_classifier
     ~input_schema:
       (`Assoc
         [
@@ -233,6 +270,7 @@ let bash : tool_def =
     (* Not idempotent: shell commands often have side effects (mkdir,
        npm install, file writes). Conservative default. *)
     ~idempotent:false ~timeout_sec:(Some 30.0) ~category:"exec"
+    ~classify_error:exec_classifier
     ~input_schema:
       (`Assoc
         [
@@ -500,6 +538,7 @@ let ask_user : tool_def =
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = ask_user_name;
     description =
       "Pause the agent and ask the user a clarifying question. The agent \

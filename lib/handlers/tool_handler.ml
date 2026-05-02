@@ -46,11 +46,19 @@ let direct : t =
   match args.tool.handler args.input with
   | Ok s -> Ok s
   | Error msg ->
-      (* Default classification: tool errors are Permanent unless a
-         middleware reclassifies (e.g. [http_get] could promote
-         "connection refused" to Transient). *)
+      (* Tools opt into transient classification via their own
+         [classify_error] (see [make_typed_tool ~classify_error]).
+         Default is [`Permanent] — most tool errors really are
+         deterministic ("file not found", "missing field"); only
+         tools with known retryable failure modes (network calls,
+         subprocesses, rate-limited APIs) should override. *)
+      let kind =
+        match args.tool.classify_error msg with
+        | `Transient -> Error.Transient
+        | `Permanent -> Error.Permanent
+      in
       Error
-        (Error.permanent ~domain:(Tool args.tool.name)
+        (Error.make ~kind ~domain:(Tool args.tool.name)
            ~code:"tool_error" msg)
 
 (* ===== Middleware: validation ===== *)

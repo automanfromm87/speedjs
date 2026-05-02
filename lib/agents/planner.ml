@@ -55,6 +55,7 @@ let submit_plan_tool : tool_def =
     idempotent = true;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = "submit_plan";
     description =
       "Submit the structured plan that decomposes the user's goal into \
@@ -303,6 +304,7 @@ let submit_recovery_tool : tool_def =
     idempotent = true;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = "submit_recovery";
     description =
       "Submit the recovery decision after seeing a task failure.";

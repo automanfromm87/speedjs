@@ -54,6 +54,7 @@ let test_context_add_tool_appends () =
       idempotent = true;
       timeout_sec = None;
       category = "test";
+      classify_error = Speedjs.Types.default_classify_error;
       name;
       description = "";
       input_schema = `Assoc [ ("type", `String "object") ];

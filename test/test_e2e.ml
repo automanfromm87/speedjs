@@ -699,6 +699,7 @@ let test_tool_handler_can_perform_log_effect () =
       idempotent = true;
       timeout_sec = Some 5.0;
       category = "test";
+      classify_error = default_classify_error;
       name = "log_then_ok";
       description = "logs a sentinel then returns ok";
       input_schema = `Assoc [];

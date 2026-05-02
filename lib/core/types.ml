@@ -85,6 +85,14 @@ type tool_def = {
   category : string;
       (** Coarse grouping for audit / metrics. Suggested values:
           ["compute"] | ["file_io"] | ["network"] | ["exec"] | ["meta"]. *)
+  classify_error : string -> [ `Transient | `Permanent ];
+      (** Map a tool's string error to a retryability class.
+          [Tool_handler.with_retry] honors [`Transient] (when the tool
+          is also [idempotent]) and propagates [`Permanent] verbatim.
+          Default classifier returns [`Permanent] — conservative, since
+          most tool errors really are deterministic. Tools with known
+          transient failure modes (network calls, subprocesses) override
+          via [make_typed_tool ~error_classifier]. *)
 }
 
 (** Build a [tool_def] from a TYPED handler. The decoder owns
@@ -100,8 +108,13 @@ type tool_def = {
 
     Errors from [input_decoder] are wrapped in
     ["invalid input: <reason>"] so the LLM gets actionable feedback. *)
+let default_classify_error : string -> [ `Transient | `Permanent ] =
+ fun _ -> `Permanent
+
 let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
-    ?(category = "general") ~name ~description ~input_schema
+    ?(category = "general")
+    ?(classify_error = default_classify_error)
+    ~name ~description ~input_schema
     ~(input_decoder : Yojson.Safe.t -> ('input, string) result)
     ~(handler : 'input -> (string, string) result) () : tool_def =
   let wrapped (json : Yojson.Safe.t) : tool_handler_result =
@@ -117,6 +130,7 @@ let make_typed_tool ?(idempotent = false) ?(timeout_sec = None)
     idempotent;
     timeout_sec;
     category;
+    classify_error;
   }
 
 (** Anthropic [tool_choice] field. [Tc_auto] is API default — we omit it

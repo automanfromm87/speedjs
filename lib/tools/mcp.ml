@@ -314,6 +314,8 @@ let to_tool_def (conn : t) (json : Yojson.Safe.t) : Types.tool_def =
           idempotent = false;
           timeout_sec = Some 30.0;
           category = "mcp";
+          (* MCP transport already classifies its own transients. *)
+          classify_error = Types.default_classify_error;
         }
   | _ -> failwith "Mcp.to_tool_def: tool must be JSON object"
 

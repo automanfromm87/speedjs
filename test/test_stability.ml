@@ -124,6 +124,7 @@ let test_tool_handler_with_timeout_aborts_slow_tool () =
       idempotent = true;
       timeout_sec = Some 0.1;
       category = "test";
+      classify_error = default_classify_error;
     }
   in
   let chain = Tool_handler.direct |> Tool_handler.with_timeout in

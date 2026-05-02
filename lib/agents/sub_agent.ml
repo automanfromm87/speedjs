@@ -31,6 +31,7 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
     idempotent = false;
     timeout_sec = None;
     category = "meta";
+    classify_error = default_classify_error;
     name = delegate_name;
     description =
       "Spawn a focused sub-agent to handle a specific subtask. The \
