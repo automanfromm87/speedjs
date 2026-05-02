@@ -364,11 +364,21 @@ let install ~tools (chain : t) f =
                       let duration = Unix.gettimeofday () -. t0 in
                       (id, name, truncate_result name raw, duration)
                     in
+                    (* Sequential dispatch only. [Parallel.map_threaded]
+                       used to be the path for batches of 2+, but tools
+                       now commonly perform effects (File_*, Time_now,
+                       Log). Effect handlers don't propagate to OS
+                       threads in OCaml 5, so a worker thread that
+                       performs an effect crashes with Unhandled. The
+                       performance cost of going sequential is small
+                       for the 2-5-tool batches the LLM typically emits;
+                       Domain-based parallel (which would need its own
+                       per-domain handler installation, like
+                       [Parallel_subagent]) is a future drop-in. *)
                     let timed =
-                      match uses with
-                      | [ single ] ->
-                          [ wrap (fun () -> one_call single) ]
-                      | _ -> Parallel.map_threaded one_call uses
+                      List.map
+                        (fun use -> wrap (fun () -> one_call use))
+                        uses
                     in
                     List.iter
                       (fun (id, name, r, duration) ->
