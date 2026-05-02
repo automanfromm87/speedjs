@@ -75,6 +75,7 @@ let oneshot ~(args : Args.t) ~tools
           working_dir = args.working_dir;
           memory_dir = args.memory_dir;
           executor_system_blocks = system_blocks;
+          restart = args.restart;
         }
       in
       Speedjs.Plan_act.run ~config ~goal:args.query ~tools ()

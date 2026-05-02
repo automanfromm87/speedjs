@@ -310,6 +310,8 @@ type config = {
           [sliding_window_at]) carry a per-instance [cut_at] ref that
           must be fresh per run. The factory is called once per
           [run] invocation. *)
+  restart : bool;
+      (** Ignore any persisted plan_state.json and replan from scratch. *)
 }
 
 (** Default executor strategy factory: soft-trigger sliding window.
@@ -333,6 +335,7 @@ let default_config =
     executor_system_prompt = Agent.default_system_prompt;
     executor_system_blocks = [];
     executor_strategy = default_executor_strategy;
+    restart = false;
   }
 
 (** Top-level plan-act run.
@@ -349,7 +352,8 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
         max_task_retries; max_recoveries; working_dir; memory_dir;
         model; planner_system_prompt;
         executor_system_prompt; executor_system_blocks;
-        executor_strategy = executor_strategy_factory } = config in
+        executor_strategy = executor_strategy_factory;
+        restart } = config in
   (* Construct a fresh strategy ONCE per run. Sliding-window-style
      strategies are stateful (cut_at ref); the same closure must be
      reused across every executor LLM call within a run so the cache
@@ -364,15 +368,39 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
      already specialized. *)
   let exec_env, planner_prefix = survey_workspace ~working_dir in
 
-  (* Step 2: plan. *)
+  (* Step 2a: try to resume from a previous interrupted run before
+     paying for the planner LLM call. plan_state.json lives next to
+     executor.json in [memory_dir]. *)
+  let resume_state =
+    if restart then None
+    else
+      match memory_dir with
+      | Some dir -> Plan_state.try_load ~dir ~goal
+      | None -> None
+  in
+
+  (* Step 2b: plan (or skip if resuming). *)
   let goal_for_planner =
     if planner_prefix = "" then goal
     else planner_prefix ^ "\n\n--- USER GOAL ---\n" ^ goal
   in
-  match
-    Planner.plan ?system_prompt:planner_system_prompt
-      ~research_tools:tools ~goal:goal_for_planner ()
-  with
+  let plan_result =
+    match resume_state with
+    | Some s ->
+        Effect.perform
+          (Effects.Log
+             (Printf.sprintf
+                "[plan_act] resuming saved state: %d/%d tasks completed, %d \
+                 recoveries used"
+                (List.length s.Plan_state.completed_rev)
+                (List.length s.plan.tasks)
+                s.recoveries));
+        Ok s.plan
+    | None ->
+        Planner.plan ?system_prompt:planner_system_prompt
+          ~research_tools:tools ~goal:goal_for_planner ()
+  in
+  match plan_result with
   | Error e -> Error e
   | Ok initial_plan ->
       Effect.perform
@@ -399,12 +427,39 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                 "[memory] loaded %d prior executor message(s)"
                 (Memory.length exec_mem)));
 
+      (* Initial drive args: either resumed from disk or fresh. *)
+      let init_pending, init_acc, init_recoveries, init_prior =
+        match resume_state with
+        | Some s ->
+            ( s.pending,
+              s.completed_rev,
+              s.recoveries,
+              s.prior_failures )
+        | None -> (initial_plan.tasks, [], 0, [])
+      in
+
+      let persist_state ~pending ~acc ~recoveries ~prior_failures =
+        match memory_dir with
+        | None -> ()
+        | Some dir ->
+            Plan_state.save ~dir
+              {
+                goal;
+                plan = initial_plan;
+                pending;
+                completed_rev = acc;
+                recoveries;
+                prior_failures;
+              }
+      in
+
       (* Step 4: drive tasks one-by-one with persistent memory +
          retry/recovery. [prior_failures] carries (description, error)
          pairs from earlier recovery cycles so the recovery planner can
          see whether a similar replan has already failed and prefer
          abandon over yet another similar-shape replan. *)
       let rec drive ~pending ~acc ~recoveries ~prior_failures =
+        persist_state ~pending ~acc ~recoveries ~prior_failures;
         match pending with
         | [] ->
             let results = List.map snd (List.rev acc) in
@@ -598,5 +653,14 @@ let run ?(config = default_config) ~goal ~tools () : agent_result =
                 ~recoveries:(recoveries + 1)
                 ~prior_failures:next_prior_failures
       in
-      drive ~pending:initial_plan.tasks ~acc:[] ~recoveries:0
-        ~prior_failures:[]
+      let result =
+        drive ~pending:init_pending ~acc:init_acc
+          ~recoveries:init_recoveries ~prior_failures:init_prior
+      in
+      (* Clear plan_state on a successful run so the next invocation
+         starts fresh. Failed summarizes leave the file so the user
+         can retry without re-running every task. *)
+      (match (result, memory_dir) with
+      | Ok _, Some dir -> Plan_state.clear ~dir
+      | _ -> ());
+      result

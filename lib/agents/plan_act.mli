@@ -56,6 +56,10 @@ type config = {
           factory is called ONCE per [run] invocation, so stateful
           strategies (like [sliding_window_at]) get fresh per-run state
           and don't leak across runs. *)
+  restart : bool;
+      (** When true, ignore any persisted [plan_state.json] and run
+          the planner from scratch. The new plan overwrites the old
+          state file. *)
 }
 
 (** Default factory: builds a fresh [sliding_window_at(60→30)] each

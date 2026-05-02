@@ -517,6 +517,109 @@ let test_ask_user_pause_then_resume () =
    Scenario 5: Sub-agent isolation (delegate doesn't leak parent history)
    ======================================================================== *)
 
+(* ========================================================================
+   Scenario 7: Resumable plan-act — interrupted run picks up where it left
+   ======================================================================== *)
+
+let test_resumable_plan_act_picks_up_after_interruption () =
+  let files = Hashtbl.create 16 in
+
+  let planner_resp =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          {
+            id = Id.Tool_use_id.of_string "u_plan";
+            name = "submit_plan";
+            input =
+              `Assoc
+                [
+                  ("title", `String "Two");
+                  ( "tasks",
+                    `List
+                      [
+                        `Assoc [ ("description", `String "task A") ];
+                        `Assoc [ ("description", `String "task B") ];
+                      ] );
+                ];
+          };
+      ]
+  in
+  let mk_submit tag result =
+    mk_resp ~stop_reason:Tool_use_stop
+      [
+        Tool_use
+          {
+            id = Id.Tool_use_id.of_string ("u_" ^ tag);
+            name = "submit_task_result";
+            input =
+              `Assoc
+                [
+                  ("success", `Bool true);
+                  ("result", `String result);
+                  ("error", `String "");
+                ];
+          };
+      ]
+  in
+
+  (* Run 1: planner + task A, deliberately short on task B's responses
+     so canned_llm fails — simulating an interruption. *)
+  let llm_run1 = canned_llm [ planner_resp; mk_submit "a" "did A" ] in
+  let config =
+    {
+      Plan_act.default_config with
+      skip_summarizer = true;
+      memory_dir = Some "/var/mem";
+    }
+  in
+  let tools = [] in
+  (try
+     ignore
+       (Llm_handler.install llm_run1 (fun () ->
+            File_handler.install
+              (File_handler.in_memory ~files)
+              (fun () ->
+                Time_handler.install Time_handler.direct (fun () ->
+                    Tool_handler.install ~tools Tool_handler.direct
+                      (fun () ->
+                        Log_handler.install Log_handler.null (fun () ->
+                            Plan_act.run ~config ~goal:"do it" ~tools ()))))))
+   with Failure _ -> ());
+
+  (* Run 1 left state behind: plan_state.json + executor.json. *)
+  assert (Hashtbl.mem files "/var/mem/plan_state.json");
+  let state_body = Hashtbl.find files "/var/mem/plan_state.json" in
+  assert (Test_helpers.contains state_body "\"goal\":");
+  assert (Test_helpers.contains state_body "do it");
+  assert (Test_helpers.contains state_body "\"task A\"");
+
+  (* Run 2: ONLY task B's submit. No planner response provided —
+     resume must skip planning and jump straight to task B. *)
+  let llm_run2 = canned_llm [ mk_submit "b" "did B" ] in
+  let result =
+    Llm_handler.install llm_run2 (fun () ->
+        File_handler.install
+          (File_handler.in_memory ~files)
+          (fun () ->
+            Time_handler.install Time_handler.direct (fun () ->
+                Tool_handler.install ~tools Tool_handler.direct (fun () ->
+                    Log_handler.install Log_handler.null (fun () ->
+                        Plan_act.run ~config ~goal:"do it" ~tools ())))))
+  in
+  (match result with
+  | Ok answer ->
+      assert (Test_helpers.contains answer "did A");
+      assert (Test_helpers.contains answer "did B")
+  | Error e -> failwith ("resumed run failed: " ^ agent_error_pp e));
+
+  (* On successful completion plan_state is cleared (empty body). *)
+  let final_state = Hashtbl.find files "/var/mem/plan_state.json" in
+  assert (final_state = "");
+  print_endline
+    "✓ E2E: resumable plan-act — run 1 crashes after task A; run 2 reads \
+     plan_state.json, skips planner, completes task B"
+
 let test_subagent_no_parent_history_leak () =
   let captured_subagent_messages : message list ref = ref [] in
   let parent_resp =
@@ -583,4 +686,5 @@ let run () =
   test_multi_task_plan_act_chains_filesystem_state ();
   test_recovery_flow_skip_then_continue ();
   test_ask_user_pause_then_resume ();
+  test_resumable_plan_act_picks_up_after_interruption ();
   test_subagent_no_parent_history_leak ()
