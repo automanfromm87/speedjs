@@ -237,10 +237,10 @@ let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
                           failwith
                             "tape misalignment: expected tool_batch, got LLM"
                       | [] ->
-                          (* Live: emit Tool_started ticks on main fiber
+                          (* Live: emit Tool_started ticks on the main fiber
                              (workers can't perform effects), then dispatch
-                             through chain, then emit Tool_finished /
-                             Tool_timeout from main fiber. *)
+                             through the chain, then emit Tool_finished /
+                             Tool_timeout from the main fiber. *)
                           List.iter
                             (fun (id, name, input) ->
                               Tool_handler.perform_tool_started_tick ~name
@@ -256,12 +256,19 @@ let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
                             (id, name, Tool_handler.truncate_result name r,
                              duration)
                           in
+                          (* Sequential dispatch — mirrors [Tool_handler.install].
+                             [Parallel.map_threaded] used to fan out batches to
+                             worker threads, but tools commonly perform
+                             [File_*] / [Time_now] / [Log] effects that can't
+                             reach handlers from a non-main thread (OCaml 5
+                             effect handlers don't propagate to threads). The
+                             tape path inherits the same fix; Domain-based
+                             parallel batching would need its own per-Domain
+                             handler stack like [Parallel_subagent]. *)
                           let timed =
-                            match uses with
-                            | [ single ] ->
-                                [ wrap (fun () -> one_with_truncate single) ]
-                            | _ ->
-                                Parallel.map_threaded one_with_truncate uses
+                            List.map
+                              (fun use -> wrap (fun () -> one_with_truncate use))
+                              uses
                           in
                           List.iter
                             (fun (id, name, r, duration) ->
