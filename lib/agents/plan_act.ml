@@ -844,9 +844,17 @@ let plan_or_resume_flow ~config ~goal ~goal_for_planner ~tools
                 }));
         List.iter
           (fun (t : task) ->
+            let deps_str =
+              match t.depends_on with
+              | [] -> ""
+              | ds ->
+                  Printf.sprintf "  [deps: %s]"
+                    (String.concat "," (List.map string_of_int ds))
+            in
             Effect.perform
               (Effects.Log
-                 (Printf.sprintf "  %d. %s" t.index t.description)))
+                 (Printf.sprintf "  %d. %s%s" t.index t.description
+                    deps_str)))
           p.tasks;
         ignore goal)
   in
