@@ -15,6 +15,10 @@
 #   SPEEDJS_PROJECT=dir project root (default /tmp/notes-chaos)
 #   SPEEDJS_TRACE=path  trace NDJSON (default /tmp/speedjs-chaos-trace.ndjson)
 #                       set to 'off' to disable
+#   PLANNER_MODEL       override planner model (e.g. claude-opus-4-5)
+#   EXECUTOR_MODEL      override per-task executor model (carries ~93% of tokens)
+#   RECOVERY_MODEL      override recovery planner model
+#   SUMMARIZER_MODEL    override final synthesizer model
 #
 # Tips for reading the run:
 #   tail -f /tmp/speedjs-chaos.log | grep -E 'chaos|retry|Recovery'
@@ -48,6 +52,12 @@ if [ "$TRACE_FILE" != "off" ]; then
   TRACE_FLAG=(--trace-file "$TRACE_FILE")
 fi
 
+MODEL_FLAGS=()
+[ -n "$PLANNER_MODEL"    ] && MODEL_FLAGS+=(--planner-model    "$PLANNER_MODEL")
+[ -n "$EXECUTOR_MODEL"   ] && MODEL_FLAGS+=(--executor-model   "$EXECUTOR_MODEL")
+[ -n "$RECOVERY_MODEL"   ] && MODEL_FLAGS+=(--recovery-model   "$RECOVERY_MODEL")
+[ -n "$SUMMARIZER_MODEL" ] && MODEL_FLAGS+=(--summarizer-model "$SUMMARIZER_MODEL")
+
 if [ -z "${RESUME:-}" ]; then
   rm -rf "$PROJECT_DIR" /tmp/speedjs-chaos-memory
   [ "$TRACE_FILE" != "off" ] && : > "$TRACE_FILE"
@@ -58,6 +68,7 @@ echo "→ project: $PROJECT_DIR"
 echo "→ skills:  $SKILLS_DIR"
 echo "→ logs:    $LOG_FILE   (tail -f to follow live)"
 echo "→ resume:  /tmp/speedjs-chaos-memory  (RESUME=1 ./chaos.sh skips done tasks)"
+[ ${#MODEL_FLAGS[@]} -gt 0 ] && echo "→ models:  ${MODEL_FLAGS[*]}"
 [ "$TRACE_FILE" != "off" ] && \
   echo "→ trace:   $TRACE_FILE  (jq 'select(.ok==false)' to find chaos-injected failures)"
 echo
@@ -81,6 +92,7 @@ dune exec speedjs -- \
   --chaos-seed "$CHAOS_SEED" \
   --chaos-llm "$CHAOS_LLM" \
   --chaos-tool "$CHAOS_TOOL" \
+  "${MODEL_FLAGS[@]}" \
   "Build a production-quality full-stack Notes app at $PROJECT_DIR.
 
 Layout (TWO sibling projects under the root):
