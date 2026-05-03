@@ -80,6 +80,11 @@ type _ Effect.t +=
           directly. Used by [Specs.executor] / [Specs.planner] /
           [Specs.recovery] flows that terminate on a structured
           submission rather than free text. *)
+  | Get_budget_progress : budget_progress Effect.t
+      (** Snapshot current cost / wall-time vs configured caps.
+          Handled by [Governor.install] which has the [cost_state] and
+          [Limits.t] in scope. Returns zeros when no Governor is
+          installed (e.g. in unit tests bypassing the runtime). *)
 
 (** Best-effort [Event_log] emit: silently drops if no Log_handler is
     installed (typical in unit tests). Use this from observational

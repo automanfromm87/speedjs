@@ -67,6 +67,17 @@ val with_timeout :
 val with_circuit_breaker :
   ?failure_threshold:int -> ?cooldown:float -> t -> t
 
+(** Detect repeated (tool, input, error_code) tuples — model stuck in
+    a tool-loop. After [threshold] consecutive identical failures
+    (default 3), enriches the error message with a "you've hit this
+    wall N times" note so the model's ReAct loop notices and pivots.
+
+    Advisory, not blocking: doesn't change kind / code, only
+    [message]. Hard escalation would risk masking transient retry
+    cycles (chaos hits often produce N identical errors in a row).
+    Counter resets on a success for the same (tool, input). *)
+val with_dedup_repeats : ?threshold:int -> t -> t
+
 (** Telemetry / security-review hooks. *)
 val with_audit :
   ?on_call:(call_args -> unit) ->

@@ -131,6 +131,85 @@ let test_tool_handler_circuit_breaker_opens_after_threshold () =
   print_endline
     "✓ Tool_handler.with_circuit_breaker opens after threshold"
 
+let test_tool_handler_dedup_annotates_after_threshold () =
+  let inner : Tool_handler.t =
+   fun args ->
+    Error
+      (Error.permanent ~domain:(Tool args.tool.name) ~code:"bad_input"
+         "missing field 'x'")
+  in
+  let chain = Tool_handler.with_dedup_repeats ~threshold:3 inner in
+  let tool = mk_test_tool "stuck" (fun _ -> Error "x") in
+  let args =
+    { Tool_handler.tool; input = `Assoc [ ("a", `Int 1) ];
+      use_id = Id.Tool_use_id.of_string "u" }
+  in
+  let unwrap = function
+    | Error e -> e
+    | Ok _ -> failwith "expected Error"
+  in
+  let e1 = unwrap (chain args) in
+  let e2 = unwrap (chain args) in
+  let e3 = unwrap (chain args) in
+  assert (not (Test_helpers.contains e1.message "[dedup]"));
+  assert (not (Test_helpers.contains e2.message "[dedup]"));
+  assert (Test_helpers.contains e3.message "[dedup]");
+  assert (Test_helpers.contains e3.message "3 times in a row");
+  print_endline
+    "✓ with_dedup_repeats annotates Nth+ failure with [dedup] note"
+
+let test_tool_handler_dedup_resets_on_success () =
+  let next_result = ref (Error "oops") in
+  let inner : Tool_handler.t =
+   fun args ->
+    match !next_result with
+    | Ok s -> Ok s
+    | Error msg ->
+        Error
+          (Error.permanent ~domain:(Tool args.tool.name) ~code:"e" msg)
+  in
+  let chain = Tool_handler.with_dedup_repeats ~threshold:3 inner in
+  let tool = mk_test_tool "x" (fun _ -> Ok "ignored") in
+  let args =
+    { Tool_handler.tool; input = `Assoc []; use_id = Id.Tool_use_id.of_string "u" }
+  in
+  let _ = chain args in
+  let _ = chain args in
+  next_result := Ok "great";
+  let _ = chain args in        (* success — counter resets *)
+  next_result := Error "again";
+  let after_reset = chain args in
+  (match after_reset with
+   | Error err ->
+       assert (not (Test_helpers.contains err.message "[dedup]"))
+   | Ok _ -> failwith "expected Error");
+  print_endline
+    "✓ with_dedup_repeats counter resets after a successful call"
+
+let test_tool_handler_dedup_distinguishes_inputs () =
+  let inner : Tool_handler.t =
+   fun args ->
+    Error
+      (Error.permanent ~domain:(Tool args.tool.name) ~code:"e" "msg")
+  in
+  let chain = Tool_handler.with_dedup_repeats ~threshold:3 inner in
+  let tool = mk_test_tool "t" (fun _ -> Error "x") in
+  let mk_args input =
+    { Tool_handler.tool; input; use_id = Id.Tool_use_id.of_string "u" }
+  in
+  let _ = chain (mk_args (`Assoc [ ("a", `Int 1) ])) in
+  let _ = chain (mk_args (`Assoc [ ("a", `Int 2) ])) in
+  let third =
+    chain (mk_args (`Assoc [ ("a", `Int 1) ]))
+  in
+  (* (a=1) has been seen 2 times; below threshold of 3 *)
+  (match third with
+   | Error err ->
+       assert (not (Test_helpers.contains err.message "[dedup]"))
+   | Ok _ -> failwith "expected Error");
+  print_endline
+    "✓ with_dedup_repeats counts per (tool, input, error_code), not globally"
+
 let test_tool_handler_audit_observes_calls () =
   let calls = ref [] in
   let results = ref [] in
@@ -222,6 +301,9 @@ let run () =
   test_tool_handler_validation_rejects_non_object ();
   test_tool_handler_retry_only_for_idempotent ();
   test_tool_handler_circuit_breaker_opens_after_threshold ();
+  test_tool_handler_dedup_annotates_after_threshold ();
+  test_tool_handler_dedup_resets_on_success ();
+  test_tool_handler_dedup_distinguishes_inputs ();
   test_tool_handler_audit_observes_calls ();
   test_make_typed_tool_decodes_input_and_runs_handler ();
   test_tool_handler_install_dispatches_via_chain ()

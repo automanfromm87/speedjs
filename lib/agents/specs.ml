@@ -245,6 +245,18 @@ smaller, more conservative move.
 - Prefer SKIP when the task is genuinely optional and the rest of the plan \
 can succeed without it.
 
+Budget heuristics (use the budget section if present):
+- If cost or walltime is at >85% of its cap, strongly prefer ABANDON or SKIP \
+over REPLAN/SPLIT — there isn't time/money left to attempt new work.
+- If at >70% but the failure is recoverable, prefer SKIP over REPLAN. \
+REPLAN replaces N tasks; you may not finish them.
+- Below 50%, decide based on the strategic merits without budget pressure.
+
+If a task previously skipped is listed under "Previously skipped tasks" \
+and the failure mentions an artifact that the skipped task was supposed \
+to produce (file, function, dependency), this is CASCADE FAILURE: prefer \
+SPLIT to insert the missing piece, not SKIP again.
+
 Don't replan to a "similar but slightly different" task list — that's how \
 death-spirals start.|}
 

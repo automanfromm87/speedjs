@@ -129,10 +129,41 @@ let parse_recovery_decision (input : Yojson.Safe.t) :
   Result.map_error (fun msg -> Plan_invalid msg)
     (with_object_input input decode)
 
+(** Render a budget snapshot section for the recovery prompt. Empty
+    string when no progress data — keeps the prompt clean for callers
+    that don't have a Governor installed. *)
+let render_budget_section (p : budget_progress) : string =
+  let pct cap used =
+    match cap with
+    | None -> "(no cap)"
+    | Some c ->
+        if c <= 0.0 then "(cap=0)"
+        else Printf.sprintf "%.0f%% used" (used /. c *. 100.0)
+  in
+  let cap_or_dash = function
+    | None -> "—"
+    | Some c -> Printf.sprintf "%.4f" c
+  in
+  let cap_sec_or_dash = function
+    | None -> "—"
+    | Some c -> Printf.sprintf "%.0fs" c
+  in
+  Printf.sprintf
+    "Budget progress:\n\
+    \  cost:     $%.4f / %s  (%s)\n\
+    \  walltime: %.0fs / %s  (%s)"
+    p.cost_used_usd
+    (cap_or_dash p.cost_max_usd)
+    (pct p.cost_max_usd p.cost_used_usd)
+    p.walltime_used_sec
+    (cap_sec_or_dash p.walltime_max_sec)
+    (pct p.walltime_max_sec p.walltime_used_sec)
+
 (** Recovery agent. Like [plan] but builds [Specs.recovery] and parses
     [submit_recovery]. *)
 let recover ?max_iterations ?model
     ?(research_tools : tool_def list = []) ?(prior_failures = [])
+    ?(skipped = []) ?budget_progress
     ?(cycle_index = 0) ?(max_cycles = 2) ~goal ~completed ~failed_task
     ~failed_error ~remaining () :
     (recovery_decision, agent_error) Result.t =
@@ -174,6 +205,23 @@ let recover ?max_iterations ?model
             Printf.sprintf "Prior recovery failures (%d):\n%s"
               (List.length prior_failures) (String.concat "\n" lines)
       in
+      let skipped_section =
+        match skipped with
+        | [] -> ""
+        | _ ->
+            Printf.sprintf
+              "\n\nPreviously skipped tasks (%d) — their artifacts are \
+               MISSING from the working dir; the current failure may be \
+               cascading from one of these:\n%s"
+              (List.length skipped)
+              (String.concat "\n"
+                 (List.map (fun t -> "  - " ^ t) skipped))
+      in
+      let budget_section =
+        match budget_progress with
+        | None -> ""
+        | Some p -> "\n\n" ^ render_budget_section p
+      in
       let body =
         Printf.sprintf
           "Goal: %s\n\n\
@@ -183,7 +231,7 @@ let recover ?max_iterations ?model
            Error: %s\n\n\
            Remaining tasks (%d):\n\
            %s\n\n\
-           %s\n\n\
+           %s%s%s\n\n\
            Recovery cycle: %d of max %d\n\n\
            First, investigate (load_skill, view_file, bash for cat/ls) — then \
            decide replan or abandon by calling submit_recovery."
@@ -192,7 +240,8 @@ let recover ?max_iterations ?model
           (String.concat "\n" (List.map (fun t -> "  - " ^ t) completed))
           failed_task.description failed_error (List.length remaining)
           (String.concat "\n" (List.map (fun t -> "  - " ^ t) remaining))
-          prior_failures_section cycle_index max_cycles
+          prior_failures_section skipped_section budget_section
+          cycle_index max_cycles
       in
       let recovery_label =
         Printf.sprintf "recovery#%d" cycle_index

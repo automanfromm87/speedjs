@@ -94,6 +94,12 @@ let build_tool_chain ~config : Tool_handler.t =
   |> Tool_handler.with_validation
   |> Tool_handler.with_retry ~policy:Llm_handler.Retry_policy.default
   |> Tool_handler.with_circuit_breaker ~failure_threshold:5 ~cooldown:60.0
+  (* Dedup OUTSIDE retry+breaker so it observes the post-retry final
+     verdict. Annotates the error message when the model has called
+     the SAME tool with the SAME input and gotten the SAME error code
+     N times in a row — a strong signal it's stuck. The model reads
+     the enriched message in the next ReAct iteration and pivots. *)
+  |> Tool_handler.with_dedup_repeats ~threshold:3
   (* Chaos OUTSIDE retry+circuit-breaker: same rationale as the LLM
      chain — injected errors propagate to submit_task_result-failure
      / plan-act recovery / workflow [recover]. *)

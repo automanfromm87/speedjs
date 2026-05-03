@@ -308,6 +308,18 @@ type plan = {
   tasks : task list;
 }
 
+(** Snapshot of the run's resource consumption against its caps —
+    surfaced via [Effects.Get_budget_progress] so callers (notably the
+    recovery planner) can make budget-aware decisions ("plenty of
+    budget left → SPLIT and try" vs "almost out → ABANDON"). [None]
+    on a [_max_*] field means no cap configured. *)
+type budget_progress = {
+  cost_used_usd : float;
+  cost_max_usd : float option;
+  walltime_used_sec : float;
+  walltime_max_sec : float option;
+}
+
 (** Mutable token / call counter shared across handler stack. *)
 type cost_state = {
   mutable input_tokens : int;

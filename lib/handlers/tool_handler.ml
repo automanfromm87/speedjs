@@ -233,6 +233,77 @@ let with_circuit_breaker ?(failure_threshold = 5) ?(cooldown = 60.0)
               end);
           r
 
+(** Detect a model stuck in a tool-loop: same (tool, input, error code)
+    seen [threshold] times in a row. Doesn't block the call — instead
+    enriches the error message with a "you've hit this exact wall N
+    times" note so the executor's ReAct loop notices and pivots
+    (call a different tool, or submit_task_result success=false).
+
+    Why advisory not blocking: a hard failure here would skip useful
+    transient retries (chaos hits often look identical for a few calls
+    in a row) and remove the model's chance to self-correct. The
+    enriched message is a strong-enough signal in practice — models
+    react to "you've done this 3 times" by changing strategy.
+
+    A successful call resets the counter for that (tool, input) pair
+    so a recovered loop doesn't carry stale escalation. *)
+let with_dedup_repeats ?(threshold = 3) (inner : t) : t =
+  let counters : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let mu = Mutex.create () in
+  let with_lock f =
+    Mutex.lock mu;
+    Fun.protect ~finally:(fun () -> Mutex.unlock mu) f
+  in
+  let call_prefix (args : call_args) =
+    Printf.sprintf "%s|%s|" args.tool.name
+      (Yojson.Safe.to_string args.input)
+  in
+  let failure_key (args : call_args) (err : Error.t) =
+    call_prefix args ^ err.code
+  in
+  fun args ->
+    match inner args with
+    | Ok _ as r ->
+        (* Reset every error-code bucket for this (tool, input). Without
+           the prefix sweep, a later failure with a fresh error code
+           would inherit the stale count from the prior different code. *)
+        let prefix = call_prefix args in
+        let plen = String.length prefix in
+        with_lock (fun () ->
+            let stale =
+              Hashtbl.fold
+                (fun k _ acc ->
+                  if String.length k >= plen && String.sub k 0 plen = prefix
+                  then k :: acc
+                  else acc)
+                counters []
+            in
+            List.iter (Hashtbl.remove counters) stale);
+        r
+    | Error err ->
+        let key = failure_key args err in
+        let count =
+          with_lock (fun () ->
+              let c =
+                (Hashtbl.find_opt counters key |> Option.value ~default:0) + 1
+              in
+              Hashtbl.replace counters key c;
+              c)
+        in
+        if count >= threshold then
+          Error
+            {
+              err with
+              message =
+                Printf.sprintf
+                  "%s\n\n[dedup] this exact call (tool=%s, same input, \
+                   error code=%s) has now failed %d times in a row — \
+                   try a different tool / different input, or call \
+                   submit_task_result with success=false to bail out."
+                  err.message args.tool.name err.code count;
+            }
+        else Error err
+
 (* ===== Middleware: audit ===== *)
 
 (** Hooks for telemetry / security review. Both callbacks default to

@@ -320,5 +320,23 @@ let install ?(limits = Limits.default) ?(clock = Unix.gettimeofday) ~cost
                   on_tick event;
                   observe state limits event;
                   continue k ())
+          | Effects.Get_budget_progress ->
+              Some
+                (fun (k : (a, _) continuation) ->
+                  (* cost_usd reads the live mutable record; the
+                     wall-time floor is a separate locked snapshot to
+                     avoid skew. Both reads cross the same mutex but
+                     not as one atomic op — acceptable, the planner
+                     uses these for heuristics, not enforcement. *)
+                  let s = Types.cost_state_snapshot state.cost in
+                  let progress : Types.budget_progress =
+                    {
+                      cost_used_usd = Types.cost_usd state.cost;
+                      cost_max_usd = limits.Limits.max_cost_usd;
+                      walltime_used_sec = state.clock () -. s.s_start_time;
+                      walltime_max_sec = limits.Limits.max_wall_time_sec;
+                    }
+                  in
+                  continue k progress)
           | _ -> None);
     }

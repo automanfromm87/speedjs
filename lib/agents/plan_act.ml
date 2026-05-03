@@ -219,9 +219,25 @@ let format_task_results plan results =
     in
     String.concat "\n\n" lines
 
+(** Plain-text fallback when the synthesizer LLM call exhausts retries
+    — produces a deterministic dump (plan + every task's result or
+    error) so the run still has SOMETHING for the caller to display.
+    Better than letting an end-of-run LLM hiccup throw away the work
+    of every prior task. *)
+let fallback_summary plan results err =
+  Printf.sprintf
+    "Goal: %s\n\nPlan: %s\n\nTask results:\n%s\n\n[note] summarizer LLM \
+     call failed after retries (%s); raw task results shown above instead \
+     of synthesized answer."
+    plan.goal plan.title
+    (format_task_results plan results)
+    (agent_error_pp err)
+
 (** Synthesizer LLM call: one final call, no tools, free-text answer.
     [model] picks the synthesizer model — None falls back to runtime
-    default. *)
+    default. Wrapped in [with_retry max=2] + [recover] so transient
+    failures (chaos / 5xx) don't waste a long run; persistent failures
+    fall back to the deterministic plan-results dump. *)
 let summarize_flow ~(model : string option) ~plan ~results :
     string Workflow.t =
   let open Workflow in
@@ -230,18 +246,29 @@ let summarize_flow ~(model : string option) ~plan ~results :
       "Goal:\n%s\n\nPlan: %s\n\nTask results:\n%s\n\nWrite the final answer."
       plan.goal plan.title (format_task_results plan results)
   in
-  of_thunk (fun () ->
-      let args : llm_call_args =
-        {
-          messages = [ user_text_message user_msg ];
-          tools = [];
-          system_override = Some summarizer_system_prompt;
-          tool_choice = Tc_auto;
-          model;
-        }
+  let llm_call =
+    of_thunk (fun () ->
+        let args : llm_call_args =
+          {
+            messages = [ user_text_message user_msg ];
+            tools = [];
+            system_override = Some summarizer_system_prompt;
+            tool_choice = Tc_auto;
+            model;
+          }
+        in
+        let response = Effect.perform (Effects.Llm_complete args) in
+        Ok (Step.extract_final_text response.content))
+  in
+  recover (with_retry ~max_attempts:2 llm_call) (fun err ->
+      let* () =
+        log_line
+          (Printf.sprintf
+             "[summarizer] LLM call failed after retries: %s — using \
+              plain-text fallback"
+             (agent_error_pp err))
       in
-      let response = Effect.perform (Effects.Llm_complete args) in
-      Ok (Step.extract_final_text response.content))
+      pure (fallback_summary plan results err))
 
 let summarize ?(model : string option) ~plan ~results () : agent_result =
   let capture (r : agent_result) : Trace.capture_result =
@@ -476,17 +503,33 @@ let run_task_flow env task : string Workflow.t =
    on success; the caller pattern-matches and pivots [drive_state]. *)
 let recovery_flow env state task err :
     Planner.recovery_decision Workflow.t =
-  let completed_descs =
-    List.rev_map (fun (t, _) -> t.description) state.acc
+  (* completed = task descs from successful entries. skipped = task
+     descs the drive loop accumulated as Error _ (recovery_decided
+     SKIP / BUDGET_EXHAUSTED). The recovery planner needs to see these
+     separately: a current failure complaining about a missing
+     artifact may be cascading from a previously-skipped task. *)
+  let completed_descs, skipped_descs =
+    List.fold_left
+      (fun (ok_acc, skip_acc) (t, r) ->
+        match r with
+        | Ok _ -> (t.description :: ok_acc, skip_acc)
+        | Error _ -> (ok_acc, t.description :: skip_acc))
+      ([], []) state.acc
   in
   let remaining_descs = List.map (fun (t : task) -> t.description) state.pending in
   Workflow.of_thunk (fun () ->
+      let budget =
+        try Some (Effect.perform Effects.Get_budget_progress)
+        with Effect.Unhandled _ -> None
+      in
       Planner.recover ?model:env.config.recovery_model
         ~research_tools:env.tools
         ~prior_failures:(List.rev state.prior_failures)
+        ~skipped:(List.rev skipped_descs)
+        ?budget_progress:budget
         ~cycle_index:state.recoveries
         ~max_cycles:env.config.max_recoveries
-        ~goal:env.goal ~completed:completed_descs ~failed_task:task
+        ~goal:env.goal ~completed:(List.rev completed_descs) ~failed_task:task
         ~failed_error:err ~remaining:remaining_descs ())
 
 (* ===== Drive loop =====
