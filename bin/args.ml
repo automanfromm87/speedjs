@@ -69,6 +69,17 @@ type t = {
   trace_file : string option;
       (** When [Some path], every LLM call and tool dispatch emits one
           NDJSON frame to [path] for offline analysis. Off by default. *)
+  trace_html : string option;
+      (** When [Some path], on exit speedjs writes a self-contained
+          HTML report (viewer + embedded ndjson) to [path]. Open with
+          a browser — no file picker, no drag. Requires
+          [trace_file] to also be set (the ndjson is the data
+          source). *)
+  trace_open : bool;
+      (** Auto-launch the trace HTML report on exit (uses [open] on
+          macOS, [xdg-open] elsewhere). Implies [--trace-html] —
+          if [trace_html] is unset, the report is written next to
+          the ndjson with a [.html] suffix. *)
   chaos_seed : int;
       (** RNG seed for [Chaos] middleware (failure injection). *)
   chaos_llm : float;
@@ -109,6 +120,12 @@ let usage () =
     "  --restart (ignore saved plan_state.json and replan from scratch)";
   prerr_endline
     "  --trace-file PATH (NDJSON frame log for every LLM call + tool dispatch)";
+  prerr_endline
+    "  --trace-html PATH (self-contained HTML report; open in browser, no";
+  prerr_endline
+    "                    file picker / no drag — splices the ndjson inline)";
+  prerr_endline
+    "  --trace-open (auto-launch the HTML report on exit; implies --trace-html)";
   prerr_endline
     "  --chaos-llm RATE  --chaos-tool RATE  --chaos-seed N";
   prerr_endline
@@ -162,6 +179,8 @@ let parse argv : t =
   let sandbox_root = ref None in
   let restart = ref false in
   let trace_file = ref None in
+  let trace_html = ref None in
+  let trace_open = ref false in
   let max_steps = ref None in
   let max_tool_calls = ref None in
   let max_subagent_depth = ref None in
@@ -199,6 +218,8 @@ let parse argv : t =
     | "--sandbox" -> sandbox_root := Some (arg "--sandbox")
     | "--restart" -> restart := true
     | "--trace-file" -> trace_file := Some (arg "--trace-file")
+    | "--trace-html" -> trace_html := Some (arg "--trace-html")
+    | "--trace-open" -> trace_open := true
     | "--max-steps" -> max_steps := Some (int_of_string (arg "--max-steps"))
     | "--max-tool-calls" ->
         max_tool_calls := Some (int_of_string (arg "--max-tool-calls"))
@@ -247,6 +268,8 @@ let parse argv : t =
         sandbox_root = !sandbox_root;
         restart = !restart;
         trace_file = !trace_file;
+        trace_html = !trace_html;
+        trace_open = !trace_open;
         max_steps = !max_steps;
         max_tool_calls = !max_tool_calls;
         max_subagent_depth = !max_subagent_depth;
@@ -290,6 +313,9 @@ let active_flags (args : t) : string list =
     (match args.trace_file with
     | Some _ -> Some "trace"
     | None -> None);
+    (match args.trace_html with
+    | Some _ -> Some "trace-html"
+    | None -> if args.trace_open then Some "trace-html(auto)" else None);
     (if args.chaos_llm > 0.0 || args.chaos_tool > 0.0 then
        Some
          (Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)"

@@ -49,7 +49,7 @@ TRACE_FILE="${SPEEDJS_TRACE:-/tmp/speedjs-chaos-trace.ndjson}"
 
 TRACE_FLAG=()
 if [ "$TRACE_FILE" != "off" ]; then
-  TRACE_FLAG=(--trace-file "$TRACE_FILE")
+  TRACE_FLAG=(--trace-file "$TRACE_FILE" --trace-open)
 fi
 
 MODEL_FLAGS=()

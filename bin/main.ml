@@ -64,4 +64,50 @@ let () =
   (match args.log_file with
   | Some _ -> Printf.eprintf "%s\n%!" summary_line
   | None -> ());
+  (* Self-contained HTML report: splice the ndjson into the bundled
+     viewer. Auto-open if --trace-open. Without a trace file there's
+     nothing to inline, so silently skip. *)
+  (match args.trace_file with
+  | None -> ()
+  | Some ndjson_path ->
+      let want_html = args.trace_html <> None || args.trace_open in
+      if want_html then begin
+        let out_path =
+          match args.trace_html with
+          | Some p -> p
+          | None ->
+              (* Default: foo.ndjson → foo.html *)
+              let base =
+                try Filename.chop_extension ndjson_path
+                with Invalid_argument _ -> ndjson_path
+              in
+              base ^ ".html"
+        in
+        match
+          Speedjs.Trace.write_html_report ~ndjson_path ~out_path
+        with
+        | Ok () ->
+            Printf.eprintf "[trace] HTML report written to %s\n%!" out_path;
+            if args.trace_open then begin
+              let cmd =
+                match Sys.os_type with
+                | "Unix" | "Cygwin" -> (
+                    match
+                      Sys.command
+                        (Printf.sprintf "command -v open >/dev/null 2>&1")
+                    with
+                    | 0 -> "open"
+                    | _ -> "xdg-open")
+                | _ -> "xdg-open"
+              in
+              let _ =
+                Sys.command
+                  (Printf.sprintf "%s %s 2>/dev/null"
+                     cmd (Filename.quote out_path))
+              in
+              ()
+            end
+        | Error msg ->
+            Printf.eprintf "[trace] HTML report failed: %s\n%!" msg
+      end);
   exit exit_code

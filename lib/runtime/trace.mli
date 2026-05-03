@@ -110,3 +110,15 @@ val span_current :
   (unit -> 'a) ->
   'a
 (** [with_span] applied to the Domain's [current ()] tracer. *)
+
+val write_html_report :
+  ndjson_path:string -> out_path:string -> (unit, string) result
+(** Splice the contents of [ndjson_path] into the embedded
+    {!Trace_viewer_template.html} placeholder and write a
+    self-contained HTML report to [out_path].
+
+    Open the resulting file in a browser — no file picker, no drag —
+    everything is inlined. Returns [Error msg] if the ndjson file is
+    missing / unreadable or the placeholder isn't found in the
+    template (the latter shouldn't happen since the template is
+    bundled into the binary). *)

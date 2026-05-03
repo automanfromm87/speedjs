@@ -222,3 +222,83 @@ let with_span (t : tracer) ~(kind : kind) ~(name : string)
 (** [with_span] using the current Domain's tracer. *)
 let span_current ~kind ~name ~input_summary ~capture f =
   with_span (current ()) ~kind ~name ~input_summary ~capture f
+
+(* ===== Self-contained HTML report ===== *)
+
+let placeholder = "__SPEEDJS_EMBEDDED_TRACE_PLACEHOLDER__"
+
+let read_file path =
+  try
+    let ic = open_in path in
+    let n = in_channel_length ic in
+    let buf = Bytes.create n in
+    really_input ic buf 0 n;
+    close_in ic;
+    Ok (Bytes.to_string buf)
+  with Sys_error msg -> Error msg
+
+let write_file path content =
+  try
+    let oc = open_out path in
+    output_string oc content;
+    close_out oc;
+    Ok ()
+  with Sys_error msg -> Error msg
+
+let replace_first ~needle ~replacement haystack =
+  match String.index_opt haystack needle.[0] with
+  | None -> None
+  | Some _ ->
+      let nlen = String.length needle in
+      let hlen = String.length haystack in
+      let rec scan i =
+        if i + nlen > hlen then None
+        else if String.sub haystack i nlen = needle then Some i
+        else scan (i + 1)
+      in
+      (match scan 0 with
+       | None -> None
+       | Some i ->
+           Some
+             (String.sub haystack 0 i ^ replacement
+              ^ String.sub haystack (i + nlen) (hlen - i - nlen)))
+
+(* The viewer's <script type="application/x-ndjson"> tag accepts raw
+   text up to the next "</script>". The only sequence we must escape
+   is the closing tag itself — even inside JSON the bytes "</script>"
+   in a tool-result string would terminate the script element early.
+   Replace each occurrence with "<\/script>" which JSON parsers and
+   browsers both accept. *)
+let escape_for_inline_script s =
+  let buf = Buffer.create (String.length s) in
+  let needle = "</script>" in
+  let nlen = String.length needle in
+  let slen = String.length s in
+  let rec loop i =
+    if i + nlen > slen then Buffer.add_substring buf s i (slen - i)
+    else if String.sub s i nlen = needle then begin
+      Buffer.add_string buf "<\\/script>";
+      loop (i + nlen)
+    end else begin
+      Buffer.add_char buf s.[i];
+      loop (i + 1)
+    end
+  in
+  loop 0;
+  Buffer.contents buf
+
+let write_html_report ~ndjson_path ~out_path =
+  let ( let* ) = Result.bind in
+  let* ndjson = read_file ndjson_path in
+  let safe = escape_for_inline_script ndjson in
+  match
+    replace_first ~needle:placeholder ~replacement:safe
+      Trace_viewer_template.html
+  with
+  | None ->
+      Error
+        (Printf.sprintf
+           "trace viewer template missing placeholder %s — was the \
+            template regenerated from a stale viewer?"
+           placeholder)
+  | Some html -> write_file out_path html

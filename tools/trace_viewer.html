@@ -49,6 +49,9 @@
 </style>
 </head>
 <body>
+<!-- Self-contained mode: speedjs's --trace-html replaces this script's
+     contents with the run's ndjson. Empty / placeholder = upload-mode. -->
+<script id="embedded-trace" type="application/x-ndjson">__SPEEDJS_EMBEDDED_TRACE_PLACEHOLDER__</script>
 <header>
   <h1>speedjs trace viewer</h1>
   <input type="file" id="file" accept=".ndjson,.json,.jsonl,application/x-ndjson">
@@ -88,6 +91,18 @@ $("#file").addEventListener("change", (ev) => {
   reader.onload = () => loadText(reader.result);
   reader.readAsText(f);
 });
+
+// Auto-load embedded trace (set by speedjs --trace-html). Placeholder
+// signals upload-mode; anything else is the ndjson contents.
+(function autoLoadEmbedded() {
+  const el = document.getElementById("embedded-trace");
+  if (!el) return;
+  const text = el.textContent.trim();
+  if (!text || text.includes("__SPEEDJS_EMBEDDED_TRACE_PLACEHOLDER__")) return;
+  // Hide the file input — this is a self-contained report.
+  $("#file").style.display = "none";
+  loadText(text);
+})();
 
 function loadText(text) {
   frames = [];
