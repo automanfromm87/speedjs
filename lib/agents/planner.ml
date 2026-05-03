@@ -18,17 +18,32 @@ let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
       in
       (match List.assoc_opt "tasks" fields with
       | Some (`List items) ->
+          let parse_dep_list = function
+            | `List xs ->
+                List.filter_map
+                  (function `Int n when n >= 1 -> Some n | _ -> None)
+                  xs
+            | _ -> []
+          in
           let tasks =
             List.mapi
               (fun i j ->
-                let description =
+                let description, depends_on =
                   match j with
                   | `Assoc fs ->
-                      Json_decode.get_string_field_or "description"
-                        ~default:"" fs
-                  | _ -> ""
+                      let desc =
+                        Json_decode.get_string_field_or "description"
+                          ~default:"" fs
+                      in
+                      let deps =
+                        match List.assoc_opt "depends_on" fs with
+                        | Some v -> parse_dep_list v
+                        | None -> []
+                      in
+                      (desc, deps)
+                  | _ -> ("", [])
                 in
-                { index = i + 1; description })
+                { index = i + 1; description; depends_on })
               items
             |> List.filter (fun t -> t.description <> "")
           in
@@ -99,13 +114,24 @@ type recovery_decision =
 let parse_tasks_field fs =
   Json_decode.get_list_field_or_empty "tasks" fs
   |> List.mapi (fun i j ->
-         let description =
+         let description, depends_on =
            match j with
            | `Assoc tfs ->
-               Json_decode.get_string_field_or "description" ~default:"" tfs
-           | _ -> ""
+               let desc =
+                 Json_decode.get_string_field_or "description" ~default:"" tfs
+               in
+               let deps =
+                 match List.assoc_opt "depends_on" tfs with
+                 | Some (`List xs) ->
+                     List.filter_map
+                       (function `Int n when n >= 1 -> Some n | _ -> None)
+                       xs
+                 | _ -> []
+               in
+               (desc, deps)
+           | _ -> ("", [])
          in
-         { index = i + 1; description })
+         { index = i + 1; description; depends_on })
   |> List.filter (fun t -> t.description <> "")
 
 let parse_recovery_decision (input : Yojson.Safe.t) :

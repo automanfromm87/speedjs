@@ -22,6 +22,15 @@ val submit_plan_name : string
 val submit_recovery_name : string
 val submit_task_result_name : string
 
+(** {1 Planner system prompts}
+
+    Two flavors. The constructors in {!planner} default to the
+    [Sequential] form; the [Dag] form is used by [Plan_act] when
+    [config.plan_mode = `Dag]. *)
+
+val default_planner_prompt : string
+val dag_planner_prompt : string
+
 (** {1 Role specs}
 
     Each constructor sets sensible defaults for the role (mode,

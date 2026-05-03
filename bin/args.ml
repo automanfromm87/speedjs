@@ -80,6 +80,11 @@ type t = {
           macOS, [xdg-open] elsewhere). Implies [--trace-html] —
           if [trace_html] is unset, the report is written next to
           the ndjson with a [.html] suffix. *)
+  plan_dag : bool;
+      (** When set, the planner is asked to declare per-task
+          dependencies and the drive loop schedules ready tasks
+          (cascade-failure short-circuits, no LLM cost on dependents
+          of a failed task). Default false → linear sequential plan. *)
   chaos_seed : int;
       (** RNG seed for [Chaos] middleware (failure injection). *)
   chaos_llm : float;
@@ -126,6 +131,12 @@ let usage () =
     "                    file picker / no drag — splices the ndjson inline)";
   prerr_endline
     "  --trace-open (auto-launch the HTML report on exit; implies --trace-html)";
+  prerr_endline
+    "  --plan-dag  (planner declares per-task depends_on; drive loop";
+  prerr_endline
+    "              schedules by readiness, cascade-skips dependents of";
+  prerr_endline
+    "              a failed task. Default: sequential linear plan.)";
   prerr_endline
     "  --chaos-llm RATE  --chaos-tool RATE  --chaos-seed N";
   prerr_endline
@@ -181,6 +192,7 @@ let parse argv : t =
   let trace_file = ref None in
   let trace_html = ref None in
   let trace_open = ref false in
+  let plan_dag = ref false in
   let max_steps = ref None in
   let max_tool_calls = ref None in
   let max_subagent_depth = ref None in
@@ -220,6 +232,7 @@ let parse argv : t =
     | "--trace-file" -> trace_file := Some (arg "--trace-file")
     | "--trace-html" -> trace_html := Some (arg "--trace-html")
     | "--trace-open" -> trace_open := true
+    | "--plan-dag" -> plan_dag := true
     | "--max-steps" -> max_steps := Some (int_of_string (arg "--max-steps"))
     | "--max-tool-calls" ->
         max_tool_calls := Some (int_of_string (arg "--max-tool-calls"))
@@ -270,6 +283,7 @@ let parse argv : t =
         trace_file = !trace_file;
         trace_html = !trace_html;
         trace_open = !trace_open;
+        plan_dag = !plan_dag;
         max_steps = !max_steps;
         max_tool_calls = !max_tool_calls;
         max_subagent_depth = !max_subagent_depth;
@@ -316,6 +330,7 @@ let active_flags (args : t) : string list =
     (match args.trace_html with
     | Some _ -> Some "trace-html"
     | None -> if args.trace_open then Some "trace-html(auto)" else None);
+    (if args.plan_dag then Some "plan=dag" else None);
     (if args.chaos_llm > 0.0 || args.chaos_tool > 0.0 then
        Some
          (Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)"

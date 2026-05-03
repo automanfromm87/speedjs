@@ -8,6 +8,7 @@
 #   SPEEDJS_PROJECT=dir   project root (default /tmp/notes-small)
 #   SPEEDJS_TRACE=path    trace ndjson (default /tmp/speedjs-small-trace.ndjson)
 #   SPEEDJS_NO_OPEN=1     don't auto-open the html report
+#   PLAN_DAG=1            use --plan-dag (planner declares depends_on)
 
 set -e
 
@@ -20,6 +21,9 @@ TRACE_FILE="${SPEEDJS_TRACE:-/tmp/speedjs-small-trace.ndjson}"
 
 OPEN_FLAG=()
 [ -z "${SPEEDJS_NO_OPEN:-}" ] && OPEN_FLAG=(--trace-open)
+
+DAG_FLAG=()
+[ -n "${PLAN_DAG:-}" ] && DAG_FLAG=(--plan-dag)
 
 rm -rf "$PROJECT_DIR" /tmp/speedjs-small-memory
 : > "$TRACE_FILE"
@@ -40,6 +44,7 @@ dune exec speedjs -- \
   --memory-dir "/tmp/speedjs-small-memory" \
   --trace-file "$TRACE_FILE" \
   "${OPEN_FLAG[@]}" \
+  "${DAG_FLAG[@]}" \
   "Compute the result of 7 * 6 using the calculator tool. Write the
    numeric answer (just the digits, no other text) to $PROJECT_DIR/answer.txt.
    Then read the file back with bash 'cat' to verify, and produce a

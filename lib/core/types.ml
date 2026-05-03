@@ -300,6 +300,11 @@ let basic_call ~messages ~tools : llm_call_args =
 type task = {
   index : int;        (** 1-indexed position in the plan *)
   description : string;
+  depends_on : int list;
+      (** 1-indexed task indices this task depends on. Empty = no
+          dependencies (can run from the start). Only consumed by the
+          DAG drive path; in [Sequential] plan_mode this field is
+          ignored and ordering comes from list position. *)
 }
 
 type plan = {

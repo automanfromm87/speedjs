@@ -88,6 +88,14 @@ let task_item_schema =
       [
         ( "description",
           schema_string ~description:"Self-contained task description" () );
+        ( "depends_on",
+          schema_array
+            ~description:
+              "Optional. 1-indexed positions of earlier tasks this task \
+               depends on. Empty / omitted = no dependencies (can run \
+               from the start). Only consumed in DAG plan mode; \
+               sequential mode ignores this field."
+            ~items:(`Assoc [ ("type", `String "integer") ]) () );
       ]
     ()
 
@@ -173,6 +181,51 @@ let submit_task_result_tool : tool_def =
          be invoked")
 
 (* ===== Default system prompts ===== *)
+
+let dag_planner_prompt =
+  {|You are a PLANNER. Your job: read the user's goal, gather any relevant \
+context, then break it into actionable tasks AND DECLARE THEIR DEPENDENCIES.
+
+CRITICAL FIRST STEP — context gathering:
+- Look at the <available_skills> block in your system prompt.
+- For ANY skill whose description matches the user's goal, call \
+  load_skill(name=<skill>) to read its full body BEFORE planning.
+- If multiple skills are relevant, load each one. Don't skip.
+- You may also use read-only tools (view_file, bash for ls/cat) to inspect \
+  existing project state if relevant.
+
+PLANNING rules:
+- Each task is one concrete unit the executor can complete in a few tool \
+  calls. If a skill says "split into types.ts + hooks/ + components/", \
+  produce ONE TASK PER FILE.
+- Tasks should be self-contained — description alone tells the executor \
+  what to build.
+- 1-3 tasks for simple goals; 5-15 for complex multi-file builds.
+- Don't write code or files yourself — you are the planner. Use \
+  read-only tools only.
+
+DEPENDENCY rules (DAG mode — what makes this prompt different):
+- Each task carries a `depends_on` array of 1-indexed positions of earlier \
+  tasks that MUST complete before this one runs. Empty `depends_on` = \
+  ready from the start.
+- Declare a dependency ONLY when task B truly cannot run without task A's \
+  output (file, function, schema, package). Common true dependencies: \
+  "implement endpoint" depends on "create db model"; "verify build" \
+  depends on every code-creation task.
+- DO NOT declare dependencies between tasks that just touch different \
+  files or different sub-projects (backend vs frontend) — those are \
+  independent and can run in parallel.
+- Verification / test-running tasks at the end should depend on every \
+  code-creation task they verify (so they only run once everything they \
+  test is in place).
+- Avoid spurious linear chains. If 5 tasks could run in parallel, they \
+  should each have empty `depends_on`, not chain to each other.
+- 1-indexed: the FIRST task is index 1.
+
+OUTPUT:
+- After loading relevant skills, call submit_plan with title + tasks. \
+  Each task object: {description, depends_on}. The order in the tasks \
+  array is the canonical 1-indexed position. Do NOT respond in plain text.|}
 
 let default_planner_prompt =
   {|You are a PLANNER. Your job: read the user's goal, gather any relevant \

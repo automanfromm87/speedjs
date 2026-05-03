@@ -308,6 +308,8 @@ let survey_workspace ~working_dir : (string * string) list * string =
 
 (* ===== Configuration ===== *)
 
+type plan_mode = [ `Sequential | `Dag ]
+
 type config = {
   skip_summarizer : bool;
   max_iterations_per_task : int;
@@ -316,9 +318,14 @@ type config = {
   working_dir : string option;
   memory_dir : string option;
   model : string;
-      (** Default model — used by every leaf that doesn't have a
-          per-spec override. Kept for back-compat; new code should
-          set the four [*_model] fields below. *)
+  plan_mode : plan_mode;
+      (** [`Sequential] (default): tasks run in list order, each one
+          waits for the previous. [`Dag]: planner declares per-task
+          [depends_on]; drive loop schedules ready tasks (all deps
+          done). DAG mode lets the planner declare independent
+          subgraphs explicitly so cascade failures stop dependents
+          from launching, and (future) so independent tasks run in
+          parallel. Switch via CLI [--plan-dag]. *)
   planner_model : string option;
       (** Override for [Planner.plan]. None inherits [model]. *)
   executor_model : string option;
@@ -350,6 +357,7 @@ let default_config =
     working_dir = None;
     memory_dir = None;
     model = Anthropic.default_model;
+    plan_mode = `Sequential;
     planner_model = None;
     executor_model = None;
     recovery_model = None;
@@ -534,8 +542,16 @@ let recovery_flow env state task err :
 
 (* ===== Drive loop =====
    Recursive workflow: each call either finalizes or runs one task and
-   recurses with an updated state. *)
+   recurses with an updated state. The shape branches on
+   [env.config.plan_mode] — Sequential walks the pending list head-on,
+   DAG schedules tasks whose [depends_on] all completed (and short-
+   circuits cascade failures without an LLM call). *)
 let rec drive_flow env state : string Workflow.t =
+  match env.config.plan_mode with
+  | `Sequential -> drive_seq_flow env state
+  | `Dag -> drive_dag_flow env state
+
+and drive_seq_flow env state : string Workflow.t =
   let open Workflow in
   let* () = action (fun () -> persist_state env state) in
   match state.pending with
@@ -558,6 +574,131 @@ let rec drive_flow env state : string Workflow.t =
              }
        | Error err ->
            handle_failure_flow env state task err rest)
+
+(* ===== DAG drive =====
+   Pick the lowest-index pending task whose [depends_on] are all
+   present as Ok in [acc]. Tasks whose deps include an Error in
+   [acc] are CASCADE-FAILED — marked Error in acc without an LLM
+   call (recovery is for task-level failures, cascade is structural).
+   Tasks whose deps are still pending → wait for them.
+
+   Termination: each iteration either drains a cascade-failed task
+   without LLM, runs one ready task, or hits a stuck graph (no
+   ready, no cascade, but pending non-empty → circular / unmet
+   dependency, treated as failure of the entire remaining set). *)
+and drive_dag_flow env state : string Workflow.t =
+  let open Workflow in
+  let* () = action (fun () -> persist_state env state) in
+  match state.pending with
+  | [] -> finalize_flow env state
+  | _ ->
+      let acc_status =
+        (* index → `Ok | `Error from already-resolved tasks *)
+        List.map
+          (fun (t, r) ->
+            (t.index, match r with Ok _ -> `Ok | Error _ -> `Error))
+          state.acc
+      in
+      let dep_status (t : task) =
+        let rec scan = function
+          | [] -> `Ready
+          | d :: rest ->
+              (match List.assoc_opt d acc_status with
+               | Some `Error -> `Cascade_failed d
+               | Some `Ok -> scan rest
+               | None -> `Waiting)
+        in
+        scan t.depends_on
+      in
+      let cascaded, others =
+        List.partition
+          (fun t ->
+            match dep_status t with `Cascade_failed _ -> true | _ -> false)
+          state.pending
+      in
+      (match cascaded with
+       | t :: rest ->
+           let dep_idx =
+             match dep_status t with
+             | `Cascade_failed d -> d
+             | _ -> 0
+           in
+           let err_str =
+             Printf.sprintf
+               "cascade: skipped because depends_on=%d failed earlier"
+               dep_idx
+           in
+           let* () =
+             log_event
+               (Task_failed
+                  { index = t.index; error = err_str; attempt = 0 })
+           in
+           drive_dag_flow env
+             {
+               state with
+               pending = rest @ others;
+               acc = (t, Error err_str) :: state.acc;
+             }
+       | [] ->
+           let ready, waiting =
+             List.partition
+               (fun t -> dep_status t = `Ready)
+               others
+           in
+           (match
+              List.sort
+                (fun a b -> compare a.index b.index)
+                ready
+            with
+            | [] ->
+                (* Nothing is ready and nothing is cascade-failed but
+                   tasks remain. The graph is unsatisfiable (circular
+                   dep, or depends_on points to a non-existing task).
+                   Mark every remaining as Failed and finalize. *)
+                let acc' =
+                  List.fold_left
+                    (fun acc t ->
+                      let err =
+                        Printf.sprintf
+                          "stuck: no satisfiable dependency order \
+                           (depends_on=%s)"
+                          (String.concat ","
+                             (List.map string_of_int t.depends_on))
+                      in
+                      (t, Error err) :: acc)
+                    state.acc waiting
+                in
+                drive_dag_flow env { state with pending = []; acc = acc' }
+            | task :: _ ->
+                let rest_ready =
+                  List.filter
+                    (fun t -> t.index <> task.index)
+                    ready
+                in
+                let* () =
+                  let total =
+                    List.length state.pending + List.length state.acc
+                  in
+                  log_event
+                    (Task_started
+                       {
+                         index = task.index;
+                         total;
+                         description = task.description;
+                       })
+                in
+                let* outcome = attempt (run_task_flow env task) in
+                let new_pending = rest_ready @ waiting in
+                (match outcome with
+                 | Ok answer ->
+                     drive_dag_flow env
+                       {
+                         state with
+                         pending = new_pending;
+                         acc = (task, Ok answer) :: state.acc;
+                       }
+                 | Error err ->
+                     handle_failure_flow env state task err new_pending)))
 
 and handle_failure_flow env state task err rest :
     string Workflow.t =
@@ -678,8 +819,16 @@ let plan_or_resume_flow ~config ~goal ~goal_for_planner ~tools
       in
       pure s.plan
   | None ->
+      (* User override wins; otherwise pick the prompt that matches
+         plan_mode so DAG runs get the dependency-aware instructions. *)
+      let effective_planner_prompt =
+        match config.planner_system_prompt, config.plan_mode with
+        | Some _, _ -> config.planner_system_prompt
+        | None, `Dag -> Some Specs.dag_planner_prompt
+        | None, `Sequential -> None
+      in
       of_thunk (fun () ->
-          Planner.plan ?system_prompt:config.planner_system_prompt
+          Planner.plan ?system_prompt:effective_planner_prompt
             ?model:config.planner_model ~research_tools:tools
             ~goal:goal_for_planner ())
   |> fun plan_flow ->

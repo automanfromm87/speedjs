@@ -33,7 +33,12 @@ type t = {
 
 let task_to_json (t : task) : Yojson.Safe.t =
   `Assoc
-    [ ("index", `Int t.index); ("description", `String t.description) ]
+    [
+      ("index", `Int t.index);
+      ("description", `String t.description);
+      ( "depends_on",
+        `List (List.map (fun n -> `Int n) t.depends_on) );
+    ]
 
 let task_of_json = function
   | `Assoc fs ->
@@ -43,7 +48,15 @@ let task_of_json = function
       let description =
         Json_decode.get_string_field_or "description" ~default:"" fs
       in
-      { index; description }
+      let depends_on =
+        match List.assoc_opt "depends_on" fs with
+        | Some (`List xs) ->
+            List.filter_map
+              (function `Int n -> Some n | _ -> None)
+              xs
+        | _ -> []  (* v2 files don't have this field — Sequential default *)
+      in
+      { index; description; depends_on }
   | _ -> failwith "task must be JSON object"
 
 let result_to_json = function
@@ -124,7 +137,7 @@ let of_json (j : Yojson.Safe.t) : t =
                     let task =
                       match List.assoc_opt "task" cfs with
                       | Some j -> task_of_json j
-                      | None -> { index = 0; description = "" }
+                      | None -> { index = 0; description = ""; depends_on = [] }
                     in
                     let result =
                       match List.assoc_opt "result" cfs with

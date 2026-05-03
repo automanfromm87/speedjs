@@ -49,6 +49,8 @@ val run_for_task :
   unit ->
   task_run_outcome
 
+type plan_mode = [ `Sequential | `Dag ]
+
 (** Configuration for [run]. Use [default_config] as a base and override
     fields with record update syntax:
     {[ run ~config:{ default_config with working_dir = Some "/tmp/proj" } ... ]} *)
@@ -64,6 +66,8 @@ type config = {
   model : string;
       (** Default model — used by every leaf without a per-spec
           override. *)
+  plan_mode : plan_mode;
+      (** [`Sequential] (default) or [`Dag]. *)
   planner_model : string option;
       (** Override for [Planner.plan]. None inherits [model]. *)
   executor_model : string option;

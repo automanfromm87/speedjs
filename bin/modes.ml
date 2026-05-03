@@ -130,6 +130,8 @@ let oneshot ~(args : Args.t) ~tools
           executor_model = args.executor_model;
           recovery_model = args.recovery_model;
           summarizer_model = args.summarizer_model;
+          plan_mode =
+            (if args.plan_dag then `Dag else `Sequential);
         }
       in
       Speedjs.Plan_act.run ~config ~goal:args.query ~tools ()

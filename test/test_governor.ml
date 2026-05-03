@@ -107,7 +107,7 @@ let test_recovery_prompt_includes_prior_failures_and_cycle () =
                 ]
               ~cycle_index:1 ~max_cycles:2 ~goal:"build it"
               ~completed:[ "scaffold" ]
-              ~failed_task:{ index = 2; description = "create binary" }
+              ~failed_task:{ index = 2; description = "create binary"; depends_on = [] }
               ~failed_error:"compile error"
               ~remaining:[ "verify"; "ship" ] ()))
   in
