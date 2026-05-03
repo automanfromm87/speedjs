@@ -8,9 +8,11 @@
 #
 # Env vars (optional):
 #   RESUME=1            keep existing project + tape, continue from last run
-#   SPEEDJS_LOG=path    override log destination (default /tmp/speedjs-run.log)
-#   SPEEDJS_TAPE=path   override tape file (default /tmp/notes-build.tape)
-#   SPEEDJS_PROJECT=dir override project root (default /tmp/notes-app)
+#   SPEEDJS_LOG=path    log destination     (default /tmp/speedjs-run.log)
+#   SPEEDJS_TAPE=path   tape file           (default /tmp/notes-build.tape)
+#   SPEEDJS_PROJECT=dir project root        (default /tmp/notes-app)
+#   SPEEDJS_TRACE=path  trace NDJSON        (default /tmp/speedjs-trace.ndjson)
+#   SPEEDJS_TRACE=off   disable structured tracing
 
 set -e
 
@@ -23,21 +25,24 @@ LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-run.log}"
 TAPE_FILE="${SPEEDJS_TAPE:-/tmp/notes-build.tape}"
 PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/notes-app}"
 SKILLS_DIR="$SCRIPT_DIR/skills"
-TRACE_FILE="${SPEEDJS_TRACE:-}"   # set this to enable structured tracing
+TRACE_FILE="${SPEEDJS_TRACE:-/tmp/speedjs-trace.ndjson}"
+
+TRACE_FLAG=()
+if [ "$TRACE_FILE" != "off" ]; then
+  TRACE_FLAG=(--trace-file "$TRACE_FILE")
+fi
 
 if [ -z "${RESUME:-}" ]; then
   rm -rf "$PROJECT_DIR" "$TAPE_FILE" /tmp/speedjs-memory
-  [ -n "$TRACE_FILE" ] && : > "$TRACE_FILE"
+  [ "$TRACE_FILE" != "off" ] && : > "$TRACE_FILE"
 fi
-
-TRACE_FLAG=()
-[ -n "$TRACE_FILE" ] && TRACE_FLAG=(--trace-file "$TRACE_FILE")
 
 echo "→ project: $PROJECT_DIR"
 echo "→ skills:  $SKILLS_DIR"
 echo "→ logs:    $LOG_FILE   (tail -f to follow live)"
 echo "→ tape:    $TAPE_FILE  (RESUME=1 ./dev.sh to continue from crash)"
-[ -n "$TRACE_FILE" ] && echo "→ trace:   $TRACE_FILE  (open tools/trace_viewer.html)"
+[ "$TRACE_FILE" != "off" ] && \
+  echo "→ trace:   $TRACE_FILE  (open tools/trace_viewer.html, drag the file in)"
 echo
 
 dune exec speedjs -- \

@@ -24,6 +24,42 @@ let mk_resp ?(usage = usage_of_basic ~input_tokens:1 ~output_tokens:1)
     ~stop_reason content =
   { content; stop_reason; usage }
 
+(* Regression: a Failed { messages = [] } must NOT overwrite the prior
+   session history. Governor_aborted / Llm_api_error caught by
+   [Protection.catch_protection_errors_output] return Failed with
+   empty messages because the run never produced a ctx; persisting
+   that empty list used to wipe multi-turn histories. *)
+let test_session_failed_with_empty_messages_preserves_prior () =
+  let prior_messages =
+    [
+      { role = User; content = [ Text "first turn" ] };
+      { role = Assistant; content = [ Text "first answer" ] };
+      { role = User; content = [ Text "second turn" ] };
+    ]
+  in
+  let prior_session =
+    Session.{
+      messages = prior_messages;
+      pending_tool_use_id = None;
+      model = "test";
+    }
+  in
+  let updated =
+    Session.update_after_output prior_session
+      (Agent.Failed
+         {
+           reason =
+             Governor_aborted
+               { limit = "max_cost"; reason = "test cost cap" };
+           messages = [];
+         })
+  in
+  assert (updated.messages = prior_messages);
+  assert (updated.pending_tool_use_id = None);
+  print_endline
+    "✓ Regression: Session.update_after_output preserves prior history \
+     on Failed{messages=[]}"
+
 let test_plan_act_task_edits_virtual_file () =
   (* Virtual FS seeded with one file. *)
   let files = Hashtbl.create 4 in
@@ -85,7 +121,7 @@ let test_plan_act_task_edits_virtual_file () =
           (File_handler.in_memory ~files)
           (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
-                Tool_handler.install ~tools tool_chain (fun () ->
+                Tool_handler.install tool_chain (fun () ->
                     Handlers.silent (fun () ->
                         Plan_act.run_for_task
                           ~task_description:"change x to 100"
@@ -154,7 +190,7 @@ let test_sandbox_blocks_tool_outside_root () =
     Llm_handler.install llm_chain (fun () ->
         File_handler.install file_chain (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
-                Tool_handler.install ~tools tool_chain (fun () ->
+                Tool_handler.install tool_chain (fun () ->
                     Handlers.silent (fun () ->
                         Plan_act.run_for_task
                           ~task_description:"read /etc/passwd"
@@ -320,7 +356,7 @@ let test_multi_task_plan_act_chains_filesystem_state () =
           (File_handler.in_memory ~files)
           (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
-                Tool_handler.install ~tools Tool_handler.direct (fun () ->
+                Tool_handler.install Tool_handler.direct (fun () ->
                     Log_handler.install Log_handler.null (fun () ->
                         Plan_act.run ~config ~goal:"do it" ~tools ())))))
   in
@@ -330,8 +366,11 @@ let test_multi_task_plan_act_chains_filesystem_state () =
   (* Final FS state: file exists, x = 2. *)
   let final = Hashtbl.find files "/proj/main.ml" in
   assert (final = "let x = 2\n");
-  (* Memory persistence: executor.json was written via File_write. *)
-  assert (Hashtbl.mem files "/var/mem/executor.json");
+  (* Durable state: unified plan_state.json carries both control plane
+     (pending/completed) and data plane (executor messages) since the
+     refactor. After a successful run the file is cleared (empty body)
+     so the next invocation starts fresh, but the path was written. *)
+  assert (Hashtbl.mem files "/var/mem/plan_state.json");
   print_endline
     "✓ E2E: multi-task plan-act — task 1 writes, task 2 reads + edits via \
      virtual FS"
@@ -433,7 +472,7 @@ let test_recovery_flow_skip_then_continue () =
           (File_handler.in_memory ~files)
           (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
-                Tool_handler.install ~tools Tool_handler.direct (fun () ->
+                Tool_handler.install Tool_handler.direct (fun () ->
                     Log_handler.install Log_handler.null (fun () ->
                         Plan_act.run ~config ~goal:"do" ~tools ())))))
   in
@@ -453,7 +492,7 @@ let test_recovery_flow_skip_then_continue () =
    ======================================================================== *)
 
 let test_ask_user_pause_then_resume () =
-  (* Run 1: agent calls ask_user → Outcome_waiting. *)
+  (* Run 1: agent calls ask_user → Agent.Waiting. *)
   let pause_resp =
     mk_resp ~stop_reason:Tool_use_stop
       [
@@ -468,14 +507,16 @@ let test_ask_user_pause_then_resume () =
   in
   let outcome1 =
     Handlers.mock ~llm_responses:[ pause_resp ] (fun () ->
-        Agent.run_session
-          ~messages:[ { role = User; content = [ Text "edit something" ] } ]
-          ~tools:Tools.all ())
+        Agent.execute
+          ~spec:(Specs.chat ~tools:Tools.all ())
+          ~input:
+            (Agent.Resume
+               [ { role = User; content = [ Text "edit something" ] } ]))
   in
   let pending_id, pending_messages =
     match outcome1 with
-    | Outcome_waiting { tool_use_id; messages; _ } -> (tool_use_id, messages)
-    | _ -> failwith "expected Outcome_waiting on first run"
+    | Agent.Waiting { tool_use_id; messages; _ } -> (tool_use_id, messages)
+    | _ -> failwith "expected Waiting on first run"
   in
   assert (Id.Tool_use_id.to_string pending_id = "u_ask");
 
@@ -504,11 +545,13 @@ let test_ask_user_pause_then_resume () =
   in
   let outcome2 =
     Handlers.mock ~llm_responses:[ final_resp ] (fun () ->
-        Agent.run_session ~messages:session2.messages ~tools:Tools.all ())
+        Agent.execute
+          ~spec:(Specs.chat ~tools:Tools.all ())
+          ~input:(Agent.Resume session2.messages))
   in
   (match outcome2 with
-  | Outcome_done { answer; _ } -> assert (answer = "Got it: /tmp/x.ml")
-  | _ -> failwith "expected Outcome_done after resume");
+  | Agent.Done { answer; _ } -> assert (answer = "Got it: /tmp/x.ml")
+  | _ -> failwith "expected Done after resume");
   print_endline
     "✓ E2E: ask_user pause → Session.append_input threads reply as \
      Tool_result → resume completes"
@@ -581,7 +624,7 @@ let test_resumable_plan_act_picks_up_after_interruption () =
               (File_handler.in_memory ~files)
               (fun () ->
                 Time_handler.install Time_handler.direct (fun () ->
-                    Tool_handler.install ~tools Tool_handler.direct
+                    Tool_handler.install Tool_handler.direct
                       (fun () ->
                         Log_handler.install Log_handler.null (fun () ->
                             Plan_act.run ~config ~goal:"do it" ~tools ()))))))
@@ -603,7 +646,7 @@ let test_resumable_plan_act_picks_up_after_interruption () =
           (File_handler.in_memory ~files)
           (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
-                Tool_handler.install ~tools Tool_handler.direct (fun () ->
+                Tool_handler.install Tool_handler.direct (fun () ->
                     Log_handler.install Log_handler.null (fun () ->
                         Plan_act.run ~config ~goal:"do it" ~tools ())))))
   in
@@ -739,12 +782,11 @@ let test_tool_handler_can_perform_log_effect () =
         File_handler.install File_handler.direct (fun () ->
             Time_handler.install Time_handler.direct (fun () ->
                 Log_handler.install log_chain (fun () ->
-                    Tool_handler.install
-                      ~tools:[ logging_tool ]
-                      tool_chain
+                    Tool_handler.install tool_chain
                       (fun () ->
-                        Agent.run ~user_query:"go" ~tools:[ logging_tool ]
-                          ())))))
+                        Agent.execute
+                          ~spec:(Specs.chat ~tools:[ logging_tool ] ())
+                          ~input:(Agent.Fresh "go"))))))
   in
   let lines = !captured in
   assert (
@@ -756,6 +798,7 @@ let test_tool_handler_can_perform_log_effect () =
      Log_handler through the full production Runtime.install chain"
 
 let run () =
+  test_session_failed_with_empty_messages_preserves_prior ();
   test_plan_act_task_edits_virtual_file ();
   test_sandbox_blocks_tool_outside_root ();
   test_tool_handler_can_perform_log_effect ();

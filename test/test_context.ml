@@ -163,7 +163,7 @@ let test_sliding_window_at_below_trigger_passes_through () =
     Speedjs.Context.Strategy.sliding_window_at ~trigger_at:10 ~keep_recent:4
   in
   let msgs = build_react_msgs ~n:6 in
-  let out = strat msgs in
+  let out = Speedjs.Context.Strategy.apply strat msgs in
   assert (out = msgs);
   print_endline
     "✓ sliding_window_at: below trigger returns messages unchanged"
@@ -173,7 +173,7 @@ let test_sliding_window_at_first_trim_invariants () =
     Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
   in
   let msgs = build_react_msgs ~n:11 in
-  let out = strat msgs in
+  let out = Speedjs.Context.Strategy.apply strat msgs in
   assert (List.length out < List.length msgs);
   assert (is_truncated_marker (List.hd out));
   assert ((List.nth out 1).role = Assistant);
@@ -205,8 +205,8 @@ let test_sliding_window_at_freezes_cut_anchor () =
     Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
   in
   let msgs1 = build_react_msgs ~n:11 in
-  let out1 = strat msgs1 in
-  let out1_again = strat msgs1 in
+  let out1 = Speedjs.Context.Strategy.apply strat msgs1 in
+  let out1_again = Speedjs.Context.Strategy.apply strat msgs1 in
   assert (List.length out1 = List.length out1_again);
   let first_kept_a = List.nth out1 1 in
   let first_kept_b = List.nth out1_again 1 in
@@ -215,7 +215,7 @@ let test_sliding_window_at_freezes_cut_anchor () =
     [ mk_asst_tool_use "ext1"; mk_user_tool_result "ext1" ]
   in
   let msgs2 = msgs1 @ extra in
-  let out2 = strat msgs2 in
+  let out2 = Speedjs.Context.Strategy.apply strat msgs2 in
   assert (is_truncated_marker (List.hd out2));
   let first_kept_c = List.nth out2 1 in
   assert (first_kept_c == first_kept_a);
@@ -228,7 +228,7 @@ let test_sliding_window_at_retrims_when_effective_exceeds_again () =
     Speedjs.Context.Strategy.sliding_window_at ~trigger_at:6 ~keep_recent:3
   in
   let msgs1 = build_react_msgs ~n:11 in
-  let out1 = strat msgs1 in
+  let out1 = Speedjs.Context.Strategy.apply strat msgs1 in
   let first_after_marker_1 = List.nth out1 1 in
   let rec append_pairs k acc =
     if k <= 0 then acc
@@ -238,7 +238,7 @@ let test_sliding_window_at_retrims_when_effective_exceeds_again () =
         (acc @ [ mk_asst_tool_use id; mk_user_tool_result id ])
   in
   let msgs2 = append_pairs 4 msgs1 in
-  let out2 = strat msgs2 in
+  let out2 = Speedjs.Context.Strategy.apply strat msgs2 in
   let first_after_marker_2 = List.nth out2 1 in
   assert (not (first_after_marker_1 == first_after_marker_2));
   assert (is_truncated_marker (List.hd out2));
@@ -254,8 +254,8 @@ let test_sliding_window_at_factory_independent_state () =
   let s2 = make () in
   let trigger_msgs = build_react_msgs ~n:11 in
   let small_msgs = build_react_msgs ~n:4 in
-  let _ = s1 trigger_msgs in
-  let out_s2 = s2 small_msgs in
+  let _ = Speedjs.Context.Strategy.apply s1 trigger_msgs in
+  let out_s2 = Speedjs.Context.Strategy.apply s2 small_msgs in
   assert (out_s2 = small_msgs);
   print_endline
     "✓ sliding_window_at: factory yields independent per-instance state"

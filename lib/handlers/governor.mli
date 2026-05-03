@@ -63,6 +63,14 @@ end
 (** The effect runtime components perform to report a lifecycle event. *)
 type _ Effect.t += Tick : Event.t -> unit Effect.t
 
+(** Best-effort [Tick] emit: silently drops if no Governor handler is
+    installed (typical in unit tests / dev runs without the production
+    runtime). Use this from sub-agent entry/exit and similar
+    bookkeeping where the sender doesn't want to crash if nobody is
+    listening. The production runtime always installs a Governor at
+    the outer layer. *)
+val safe_tick : Event.t -> unit
+
 (** Raised when a configured limit is crossed. Caught at the top-level
     by [Protection.catch_protection_errors]. *)
 exception Governor_aborted of {

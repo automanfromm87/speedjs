@@ -81,15 +81,26 @@ type capability =
   | Terminal        (** Synthetic terminal tool (submit_task_result, etc).
                         Handler never invoked; intercepted by run_loop. *)
 
-(** Where a tool may be exposed. The runtime filters [tool_def]s by
-    cross-referencing [agent_mode] with the tool's [allowed_modes].
+(** A tool-surface profile, NOT a role tag. Each [tool_def] declares
+    which profiles may see it via [allowed_modes]; [tools_for_mode]
+    filters a tool list down to one profile's surface.
 
-    - [Planner]   : decomposes the user goal. Read-only research only.
-    - [Recovery]  : decides REPLAN/SPLIT/SKIP/ABANDON when a task fails.
-                    Same surface as Planner.
-    - [Executor]  : the per-task ReAct loop. Full surface.
-    - [Subagent]  : delegated focused task. Full surface minus [Meta]
-                    (no recursive delegate, no parallel_delegate). *)
+    The names are historical (they correspond to the role each profile
+    typically serves) but the semantic is purely "which tools are
+    visible". A spec's [Agent_spec.mode] is the profile its tool surface
+    is filtered by — agent identity comes from the full [Agent_spec],
+    not from the mode tag.
+
+    - [Planner]   : read-only research surface (used by planner / chat
+                    in research-only configurations).
+    - [Recovery]  : same as [Planner].
+    - [Executor]  : full surface, including [parallel_delegate]. Used
+                    by the per-task executor and by chat agents that
+                    need write/exec access.
+    - [Subagent]  : full surface minus [parallel_delegate] (capped to
+                    avoid recursive fan-out); the serial [delegate]
+                    tool IS available — nesting is allowed,
+                    [Governor.max_subagent_depth] is the cap. *)
 type agent_mode = Planner | Recovery | Executor | Subagent
 
 let agent_mode_to_string = function
@@ -215,7 +226,7 @@ type tool_choice =
   | Tc_tool of string (* must call this specific tool *)
   | Tc_none (* tools available but model must answer in text *)
 
-(** Top-level error type returned by [Agent.run] / [Plan_act.run]. *)
+(** Top-level error type returned by [Agent.execute] / [Plan_act.run]. *)
 type agent_error =
   | Max_iterations_reached of int
   | Llm_max_tokens
@@ -251,29 +262,11 @@ let rec agent_error_pp = function
       Printf.sprintf "task %d (%s) failed: %s" task_index description
         (agent_error_pp reason)
 
-(** Agent result: Ok of final text answer, or Error of typed reason. *)
+(** Single final-answer return shape used by orchestration layers
+    (e.g. [Plan_act.run]) that synthesize one string from many
+    sub-runs. Per-agent calls return the richer [Agent.output]
+    instead. *)
 type agent_result = (string, agent_error) Result.t
-
-(** Multi-turn session outcome.
-
-    [Outcome_waiting] is produced when the model calls the [ask_user]
-    pause-tool: the agent loop halts mid-conversation, the messages so far
-    are returned, and the next user input becomes the [Tool_result] that
-    answers [tool_use_id]. *)
-type session_result =
-  | Outcome_done of {
-      answer : string;
-      final_messages : message list;
-    }
-  | Outcome_waiting of {
-      tool_use_id : Id.Tool_use_id.t;
-      question : string;
-      messages : message list;
-    }
-  | Outcome_failed of {
-      reason : agent_error;
-      messages : message list;
-    }
 
 (** Arguments to one LLM call. Carried by the [Llm_complete] effect.
 
@@ -292,41 +285,15 @@ type llm_call_args = {
 let basic_call ~messages ~tools : llm_call_args =
   { messages; tools; system_override = None; tool_choice = Tc_auto }
 
-(* ===== Planner / plan-act types ===== *)
+(* ===== Planner shared types =====
+   [task] and [plan] are shared by [Planner] (which produces them)
+   and [Plan_act] (which consumes them). Plan_act-only outcome types
+   ([task_submit], [task_run_outcome]) live in [Plan_act] itself. *)
 
 type task = {
   index : int;        (** 1-indexed position in the plan *)
   description : string;
 }
-
-(** Structured task outcome submitted via the [submit_task_result] terminal
-    tool. Captures explicit success / failure semantics — distinct from
-    "agent ran out of things to say" (End_turn). *)
-type task_submit = {
-  ts_success : bool;
-  ts_result : string;
-  ts_error : string;
-}
-
-(** What [Agent.run_for_task] returns. Differentiates between:
-    - explicit success/failure via submit_task_result
-    - implicit "End_turn" without submit (still useful — captures the answer)
-    - structural failures (max iter, etc.) that need recovery *)
-type task_run_outcome =
-  | Task_done_explicit of {
-      submit : task_submit;
-      messages : message list;
-    }
-  | Task_done_implicit of {
-      answer : string;
-      messages : message list;
-    }
-  | Task_run_failed of { reason : agent_error; messages : message list }
-  | Task_run_waiting of {
-      tool_use_id : Id.Tool_use_id.t;
-      question : string;
-      messages : message list;
-    }
 
 type plan = {
   title : string;

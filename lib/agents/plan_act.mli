@@ -7,12 +7,31 @@
 
 open Types
 
-(** Synthetic terminal tool the executor calls to signal task completion
-    (or definitive failure). The handler is never invoked — the agent
-    loop intercepts via [terminal_tools] and short-circuits. *)
-val submit_task_result_name : string
+(** Structured payload submitted via [submit_task_result]. Carries
+    explicit success / failure semantics, distinct from an [End_turn]
+    free-text response. *)
+type task_submit = {
+  ts_success : bool;
+  ts_result : string;
+  ts_error : string;
+}
 
-val submit_task_result_tool : tool_def
+(** Outcome of {!run_for_task}. *)
+type task_run_outcome =
+  | Task_done_explicit of {
+      submit : task_submit;
+      messages : message list;
+    }
+  | Task_done_implicit of {
+      answer : string;
+      messages : message list;
+    }
+  | Task_run_failed of { reason : agent_error; messages : message list }
+  | Task_run_waiting of {
+      tool_use_id : Id.Tool_use_id.t;
+      question : string;
+      messages : message list;
+    }
 
 (** Run a single task with structured outcome. [prior_messages] is the
     executor's accumulated history; the new task is appended (with

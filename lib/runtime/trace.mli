@@ -84,6 +84,11 @@ val ok_capture :
   capture_result
 (** Convenience builder for the success path. *)
 
+val fail_capture : error:string -> capture_result
+(** Convenience builder for the failure path. [output = ""],
+    [tokens = zero_tokens], [cost_delta = 0.0], [ok = false],
+    [error = Some error]. *)
+
 val with_span :
   tracer ->
   kind:kind ->

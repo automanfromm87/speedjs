@@ -16,37 +16,28 @@
 
 open Types
 
-(** What happened in one step. The Context is always returned at its
-    new state (assistant response + any tool_results appended), so
-    callers can persist / inspect it. *)
+(** What [once] returns. The Context is always returned at its new
+    state (assistant response + any tool_results appended), so
+    callers can persist / inspect it. Pause / Terminal-tool DON'T
+    appear here — they are surfaced via [Effects.Pause] /
+    [Effects.Terminal] so upstream combinators can intercept (e.g.
+    install an auto-answer handler for tests). The default handler
+    in [Agent.execute] translates them into [Agent.Waiting] /
+    [Agent.Terminal_tool]. *)
 type result =
   | Continue of Context.t
       (** Tool batch dispatched; ready for another step. *)
   | Terminal_text of { answer : string; ctx : Context.t }
       (** Model emitted text-only with [End_turn] / [Stop_sequence]. *)
-  | Terminal_tool of {
-      tool_name : string;
-      input : Yojson.Safe.t;
-      ctx : Context.t;
-    }
-      (** Model called a tool listed in [terminal_tools]. The tool was
-          NOT dispatched — caller decides what to do with [input]
-          (e.g. [submit_task_result] parsing in plan-act). *)
-  | Wait_for_user of {
-      tool_use_id : Id.Tool_use_id.t;
-      question : string;
-      ctx : Context.t;
-    }
-      (** Model called the [ask_user] pause-tool. Caller should suspend
-          the run and persist [ctx]; resume by appending the user's
-          answer as a [Tool_result] for [tool_use_id]. *)
   | Failed of { reason : agent_error; ctx : Context.t }
       (** [Llm_max_tokens], [Llm_refused], [Stop_reason_unexpected]. *)
 
 (** Dispatch all [Tool_use] blocks in [content] via the [Tool_calls]
     effect, returning matched [Tool_result] blocks in original order.
-    Reusable by other agents (e.g. [Planner]) that drive their own loop. *)
-val dispatch_tool_uses : content_block list -> content_block list
+    [tools] is the registry the dispatcher will look names up in;
+    typically [Context.tools ctx]. *)
+val dispatch_tool_uses :
+  tools:tool_def list -> content_block list -> content_block list
 
 (** Concatenate all [Text] blocks (newline-separated). Drop tool_use /
     tool_result blocks. *)

@@ -69,6 +69,14 @@ type t = {
   trace_file : string option;
       (** When [Some path], every LLM call and tool dispatch emits one
           NDJSON frame to [path] for offline analysis. Off by default. *)
+  chaos_seed : int;
+      (** RNG seed for [Chaos] middleware (failure injection). *)
+  chaos_llm : float;
+      (** [0.0–1.0] probability of injecting an LLM API failure per
+          call. 0.0 = chaos middleware is no-op. *)
+  chaos_tool : float;
+      (** [0.0–1.0] probability of injecting a tool failure per
+          dispatch. *)
 }
 
 let default_walltime = 1800.0
@@ -91,6 +99,12 @@ let usage () =
     "  --restart (ignore saved plan_state.json and replan from scratch)";
   prerr_endline
     "  --trace-file PATH (NDJSON frame log for every LLM call + tool dispatch)";
+  prerr_endline
+    "  --chaos-llm RATE  --chaos-tool RATE  --chaos-seed N";
+  prerr_endline
+    "    (probabilistic failure injection — exercises retry / recovery";
+  prerr_endline
+    "     paths; 0.0 = off. Same seed reproduces the same failure sequence.)";
   prerr_endline
     "  --log-file PATH  --session PATH  --mcp \"cmd args\" (repeatable)";
   prerr_endline "  --debug-request";
@@ -134,6 +148,9 @@ let parse argv : t =
   let max_tool_calls = ref None in
   let max_subagent_depth = ref None in
   let max_repeated_tool_calls = ref None in
+  let chaos_seed = ref 42 in
+  let chaos_llm = ref 0.0 in
+  let chaos_tool = ref 0.0 in
   let n = Array.length argv in
   let i = ref 1 in
   while !i < n do
@@ -169,6 +186,9 @@ let parse argv : t =
     | "--max-repeated-tool-calls" ->
         max_repeated_tool_calls :=
           Some (int_of_string (arg "--max-repeated-tool-calls"))
+    | "--chaos-seed" -> chaos_seed := int_of_string (arg "--chaos-seed")
+    | "--chaos-llm" -> chaos_llm := float_of_string (arg "--chaos-llm")
+    | "--chaos-tool" -> chaos_tool := float_of_string (arg "--chaos-tool")
     | "-h" | "--help" -> usage ()
     | s when not (String.starts_with ~prefix:"--" s) -> query := Some s
     | other ->
@@ -204,6 +224,9 @@ let parse argv : t =
         max_tool_calls = !max_tool_calls;
         max_subagent_depth = !max_subagent_depth;
         max_repeated_tool_calls = !max_repeated_tool_calls;
+        chaos_seed = !chaos_seed;
+        chaos_llm = !chaos_llm;
+        chaos_tool = !chaos_tool;
       }
 
 (** Build the "[active] ..." status line as a list of flag descriptions
@@ -236,5 +259,10 @@ let active_flags (args : t) : string list =
     (match args.trace_file with
     | Some _ -> Some "trace"
     | None -> None);
+    (if args.chaos_llm > 0.0 || args.chaos_tool > 0.0 then
+       Some
+         (Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)"
+            args.chaos_seed args.chaos_llm args.chaos_tool)
+     else None);
   ]
   |> List.filter_map Fun.id

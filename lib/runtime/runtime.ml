@@ -33,6 +33,10 @@ type config = {
           no-op. Pass a function here to drive a UI, telemetry
           pipeline, or append-only journal; events still render to
           the [on_log] sink in parallel via [Event.to_log_line]. *)
+  chaos : Chaos.config;
+      (** Chaos middleware config (failure injection). [Chaos.default]
+          for production runs (no-op). Set non-zero rates to exercise
+          retry / recovery paths. *)
 }
 
 (* ===== chain builders ===== *)
@@ -58,8 +62,16 @@ let build_llm_chain ~config : Llm_handler.t =
   |> Llm_handler.with_validation
   |> Llm_handler.with_cost_tracking ~cost:config.cost
   |> Llm_handler.with_retry ~policy ~on_retry
-  (* Trace OUTSIDE retry so one span = one logical LLM call (covers all
-     retry attempts), not one span per retry attempt. *)
+  (* Chaos OUTSIDE retry: an injected failure bypasses per-call retry
+     and propagates up to plan-act recovery / workflow [recover] —
+     that's the layer chaos engineering wants to verify. The retry
+     middleware already proves itself when REAL upstream failures hit
+     (LLM API does throttle / blip). [Chaos.with_llm] is no-op when
+     the rate is 0.0 so this is free in normal runs. *)
+  |> Chaos.with_llm config.chaos
+  (* Trace OUTSIDE retry+chaos so one span = one logical LLM call
+     (covers all retry attempts AND captures chaos-injected failures
+     in the trace), not one span per retry attempt. *)
   |> Llm_handler.with_tracing ~tracer:config.tracer ~model:config.model
   |> Llm_handler.with_governor_ticks
   |> Llm_handler.with_logging ~on_log:config.on_log
@@ -82,6 +94,10 @@ let build_tool_chain ~config : Tool_handler.t =
   |> Tool_handler.with_validation
   |> Tool_handler.with_retry ~policy:Llm_handler.Retry_policy.default
   |> Tool_handler.with_circuit_breaker ~failure_threshold:5 ~cooldown:60.0
+  (* Chaos OUTSIDE retry+circuit-breaker: same rationale as the LLM
+     chain — injected errors propagate to submit_task_result-failure
+     / plan-act recovery / workflow [recover]. *)
+  |> Chaos.with_tool config.chaos
   (* Trace OUTSIDE retry — one span per logical tool call. *)
   |> Tool_handler.with_tracing ~tracer:config.tracer
   |> Tool_handler.with_logging ~on_log:config.on_log
@@ -91,7 +107,32 @@ let build_log_chain ~config : Log_handler.t =
 
 (* ===== install ===== *)
 
-let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
+(** Build the child config for [Workflow.parallel] / sub-agent fan-out:
+    fork the tracer (per-Domain push/pop stack writing to the parent's
+    sink), drop tape recording (no recursive tape), drop streaming /
+    crash demos. Cost is shared so [max_cost_usd] / [max_steps] account
+    for child spend in real time. *)
+let fork_child_config (parent : config) : config =
+  let initial_parent_id = Trace.current_parent parent.tracer in
+  let child_tracer =
+    Trace.fork ~parent:parent.tracer ~initial_parent_id ()
+  in
+  {
+    parent with
+    on_text_delta = (fun _ -> ());
+    tape_path = None;
+    crash_after = None;
+    tracer = child_tracer;
+  }
+
+let rec install ~(config : config) (thunk : unit -> 'a) : 'a =
+  (* Self-install branch wrapper for [Workflow.parallel]: each branch
+     runs against a freshly-installed child stack. Library callers
+     using only [Runtime.install] now get a working [Workflow.parallel]
+     without needing to remember [Workflow.set_branch_wrapper]
+     manually. *)
+  Workflow.set_branch_wrapper (fun branch_thunk ->
+    install ~config:(fork_child_config config) branch_thunk);
   let llm_chain = build_llm_chain ~config in
   let tool_chain = build_tool_chain ~config in
   let log_chain = build_log_chain ~config in
@@ -128,7 +169,7 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
       governed (fun () ->
           Llm_handler.install llm_chain (fun () ->
               with_io_and_log (fun () ->
-                  Tool_handler.install ~tools tool_chain thunk)))
+                  Tool_handler.install tool_chain thunk)))
   | Some path ->
       let session =
         Checkpoint.open_session ~path ~on_log:config.on_log
@@ -139,5 +180,5 @@ let install ~tools ~(config : config) (thunk : unit -> 'a) : 'a =
       governed (fun () ->
           Llm_handler.install llm_with_tape (fun () ->
               with_io_and_log (fun () ->
-                  Checkpoint.install_tools_with_tape session ~tools tool_chain
+                  Checkpoint.install_tools_with_tape session tool_chain
                     thunk)))

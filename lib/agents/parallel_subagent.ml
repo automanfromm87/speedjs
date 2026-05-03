@@ -167,14 +167,8 @@ let make_delegate_tool
                join), regardless of N. The structured Event still
                carries [n_children] so observers can distinguish
                serial from parallel + count fan-outs separately. *)
-            let safe_tick ev =
-              try Effect.perform (Governor.Tick ev) with _ -> ()
-            in
-            let safe_event ev =
-              try Effect.perform (Effects.Event_log ev) with _ -> ()
-            in
-            safe_tick Subagent_entered;
-            safe_event
+            Governor.safe_tick Subagent_entered;
+            Effects.safe_event_log
               (Event.Subagent_entered
                  { mode = "parallel_delegate"; n_children = n });
             let thunks =
@@ -194,19 +188,24 @@ let make_delegate_tool
                       Trace.span_current ~kind:Trace.Agent_spawn
                         ~name:prefix ~input_summary:task ~capture
                         (fun () ->
-                          match
-                            Agent.run ~user_query:task
-                              ~tools:tools_for_subagent ()
-                          with
-                          | Ok s -> s
-                          | Error e -> "[ERROR] " ^ agent_error_pp e)))
+                          let spec =
+                            Specs.subagent ~tools:tools_for_subagent ()
+                          in
+                          let out =
+                            Agent.execute ~spec ~input:(Agent.Fresh task)
+                          in
+                          (match
+                             Agent.expect_done ~name:prefix out
+                           with
+                           | Ok (answer, _) -> answer
+                           | Error e -> "[ERROR] " ^ agent_error_pp e))))
                 tasks
             in
             let answers =
               Fun.protect
                 ~finally:(fun () ->
-                  safe_tick Subagent_exited;
-                  safe_event
+                  Governor.safe_tick Subagent_exited;
+                  Effects.safe_event_log
                     (Event.Subagent_exited { mode = "parallel_delegate" }))
                 (fun () -> run thunks)
             in

@@ -209,12 +209,8 @@ let with_tape_llm (s : session) (inner : Llm_handler.t) : Llm_handler.t =
    replacement for [Tool_handler.install] rather than a chain
    middleware. *)
 
-let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
-    f =
+let install_tools_with_tape (s : session) (chain : Tool_handler.t) f =
   let open Effect.Deep in
-  let find_tool name =
-    List.find_opt (fun (t : Types.tool_def) -> t.name = name) tools
-  in
   let rec wrap : type r. (unit -> r) -> r =
    fun thunk ->
     try_with thunk ()
@@ -222,9 +218,14 @@ let install_tools_with_tape (s : session) ~tools (chain : Tool_handler.t)
         effc =
           (fun (type a) (eff : a Effect.t) ->
             match eff with
-            | Effects.Tool_calls uses ->
+            | Effects.Tool_calls (tools, uses) ->
                 Some
                   (fun (k : (a, _) continuation) ->
+                    let find_tool name =
+                      List.find_opt
+                        (fun (t : Types.tool_def) -> t.name = name)
+                        tools
+                    in
                     let results =
                       match s.pending with
                       | Tape_tool_batch saved :: rest ->

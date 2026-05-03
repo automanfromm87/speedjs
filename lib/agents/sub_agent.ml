@@ -1,9 +1,10 @@
 (** Sub-agent: spawn a focused agent with its own message history.
 
     Implementation approach: NO new effect needed. The [delegate] tool's
-    handler simply calls [Agent.run] internally — this gives us:
+    handler builds a [Specs.subagent] spec and calls [Agent.execute] —
+    this gives us:
 
-    - Isolated message history (the sub-agent's [Agent.run] starts fresh)
+    - Isolated message history (the sub-agent starts from [Fresh task])
     - Shared LLM provider (sub-agent's [Effects.Llm_complete] propagates up
       to the parent's production handler — same API key, same cost tracking)
     - Shared tools dispatch (sub-agent's [Effects.Tool_call] also propagates,
@@ -80,19 +81,8 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
                         (if String.length task > 100 then
                            String.sub task 0 100 ^ "..."
                          else task)));
-                (* Best-effort Governor tick: tests / dev runs without an
-                   installed Governor will see [Effect.Unhandled] from
-                   [perform] — swallow it so unsandboxed callers still
-                   work. The production runtime always installs a
-                   Governor at the outermost layer (see [bin/setup.ml]). *)
-                let safe_tick ev =
-                  try Effect.perform (Governor.Tick ev) with _ -> ()
-                in
-                let safe_event ev =
-                  try Effect.perform (Effects.Event_log ev) with _ -> ()
-                in
-                safe_tick Subagent_entered;
-                safe_event
+                Governor.safe_tick Subagent_entered;
+                Effects.safe_event_log
                   (Event.Subagent_entered { mode = "delegate"; n_children = 1 });
                 let capture (r : (string, agent_error) result) :
                     Trace.capture_result =
@@ -100,27 +90,27 @@ let make_delegate_tool ~(tools_for_subagent : tool_def list) : tool_def =
                   | Ok answer ->
                       Trace.ok_capture ~output:answer
                         ~tokens:Trace.zero_tokens ~cost_delta:0.0
-                  | Error e ->
-                      {
-                        output = "";
-                        tokens = Trace.zero_tokens;
-                        cost_delta = 0.0;
-                        ok = false;
-                        error = Some (agent_error_pp e);
-                      }
+                  | Error e -> Trace.fail_capture ~error:(agent_error_pp e)
                 in
                 let result =
                   Fun.protect
                     ~finally:(fun () ->
-                      safe_tick Subagent_exited;
-                      safe_event
+                      Governor.safe_tick Subagent_exited;
+                      Effects.safe_event_log
                         (Event.Subagent_exited { mode = "delegate" }))
                     (fun () ->
                       Trace.span_current ~kind:Trace.Agent_spawn
                         ~name:"delegate" ~input_summary:task ~capture
                         (fun () ->
-                          Agent.run ~user_query:task
-                            ~tools:tools_for_subagent ()))
+                          let spec =
+                            Specs.subagent ~tools:tools_for_subagent ()
+                          in
+                          let out =
+                            Agent.execute ~spec ~input:(Agent.Fresh task)
+                          in
+                          Result.map
+                            (fun (answer, _) -> answer)
+                            (Agent.expect_done ~name:"subagent" out)))
                 in
                 Effect.perform
                   (Effects.Log "  [sub-agent] returning to parent");

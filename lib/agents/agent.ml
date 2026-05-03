@@ -1,44 +1,32 @@
 (** The ReAct agent loop, written in pure effect-perform style.
 
-    Knows nothing about HTTP, LLM APIs, or tool execution — it just performs
-    effects. The handler installed at runtime decides everything. *)
+    Knows nothing about HTTP, LLM APIs, or tool execution — it just
+    performs effects. The handler installed at runtime decides
+    everything. See [agent.mli] for the public surface. *)
 
 open Types
 
-(** Default iteration cap per agent invocation. helix uses 100; we match.
-    Lower values (e.g. 10 — the old hardcoded value) starve any task that
-    needs a build → fix → rebuild loop. *)
-let default_max_iterations = 100
-
-(** Raised when the LLM calls the [ask_user] pause-tool. The agent loop
-    halts mid-conversation; [run_session] catches this and returns
-    [Outcome_waiting]. *)
-exception Wait_for_user of {
-  tool_use_id : Id.Tool_use_id.t;
-  question : string;
-  ctx_so_far : Context.t;
-}
-
-(** Raised when the LLM calls a tool listed in the loop's
-    [terminal_tools] set — e.g. [submit_task_result]. The loop short-circuits
-    and the caller (typically [Plan_act]) parses the structured input. *)
-exception Task_terminal_called of {
-  tool_name : string;
-  input : Yojson.Safe.t;
-  ctx_so_far : Context.t;
-}
+let default_max_iterations = Agent_spec.default_max_iters
+let default_system_prompt = Agent_spec.default_system_prompt
 
 (** Core ReAct loop. Drives [Step.once] up to [max_iterations] times,
     handling endgame [tool_choice] forcing and per-iteration logging /
-    Governor ticks. Returns [Ok (answer, final_ctx)] or
-    [Error (reason, partial_ctx)]. May raise [Wait_for_user] /
-    [Task_terminal_called] for callers that want to suspend. *)
+    Governor ticks.
+
+    Pause / Terminal-tool surface through {!Effects.Pause} /
+    {!Effects.Terminal} effects performed inside [Step.once]; this
+    loop never sees those branches. The handler is installed by
+    [execute] (one level up). *)
 let run_loop ?(max_iterations = default_max_iterations)
     ?(terminal_tools : string list = [])
+    ?(force_terminal_in_last_n = 2)
     ?(strategy = Context.Strategy.flat) ?(name = "agent")
     ~(ctx : Context.t) () :
     (string * Context.t, agent_error * Context.t) Result.t =
-  let endgame_iter_threshold = max (max_iterations - 2) 1 in
+  let endgame_iter_threshold =
+    if force_terminal_in_last_n <= 0 then max_iterations + 1  (* never trip *)
+    else max (max_iterations - force_terminal_in_last_n) 1
+  in
   let safe_tick ev =
     try Effect.perform (Governor.Tick ev) with _ -> ()
   in
@@ -69,9 +57,6 @@ let run_loop ?(max_iterations = default_max_iterations)
           match o with
           | Step.Continue _ -> ("continue", true)
           | Step.Terminal_text _ -> ("terminal_text", true)
-          | Step.Terminal_tool { tool_name; _ } ->
-              (Printf.sprintf "terminal_tool=%s" tool_name, true)
-          | Step.Wait_for_user _ -> ("wait_for_user", true)
           | Step.Failed { reason; _ } ->
               (Printf.sprintf "failed: %s" (agent_error_pp reason), false)
         in
@@ -93,120 +78,174 @@ let run_loop ?(max_iterations = default_max_iterations)
       match outcome with
       | Step.Continue ctx -> loop ctx (iter + 1)
       | Step.Terminal_text { answer; ctx } -> Ok (answer, ctx)
-      | Step.Terminal_tool { tool_name; input; ctx } ->
-          raise
-            (Task_terminal_called
-               { tool_name; input; ctx_so_far = ctx })
-      | Step.Wait_for_user { tool_use_id; question; ctx } ->
-          raise
-            (Wait_for_user
-               { tool_use_id; question; ctx_so_far = ctx })
       | Step.Failed { reason; ctx } -> Error (reason, ctx)
     end
   in
   loop ctx 1
 
-let default_system_prompt =
-  "You are a helpful assistant. Use the available tools when they help \
-   answer the user's question. Think step-by-step and only call tools when \
-   they are needed."
+(* ===== Unified entry point ===== *)
 
-(** Build a [Context] for a single user-query / tools combination. *)
-let make_ctx ?(system_prompt = default_system_prompt) ?system_blocks
-    ~user_query ~tools () =
-  Context.empty
-  |> Context.with_tools tools
-  |> Context.apply_system ~system_prompt ?system_blocks
-  |> Context.push_user_text user_query
+type input =
+  | Fresh of string
+  | Resume of message list
 
-(** One-shot entry point. Returns just the final answer string. *)
-let run ?max_iterations ?system_prompt ?system_blocks ~user_query ~tools
-    () : agent_result =
-  let ctx = make_ctx ?system_prompt ?system_blocks ~user_query ~tools () in
-  match run_loop ?max_iterations ~ctx () with
-  | Ok (answer, _) -> Ok answer
-  | Error (e, _) -> Error e
+type output =
+  | Done of { answer : string; messages : message list }
+  | Terminal_tool of {
+      name : string;
+      payload : Yojson.Safe.t;
+      messages : message list;
+    }
+  | Waiting of {
+      tool_use_id : Id.Tool_use_id.t;
+      question : string;
+      messages : message list;
+    }
+  | Failed of { reason : agent_error; messages : message list }
 
-(** Run a ReAct loop until a specific terminal tool is called and
-    return its parsed JSON input. The terminal tool's [handler] is
-    never invoked — the loop intercepts via [terminal_tools] and
-    raises [Task_terminal_called]. Used by orchestrators (planner,
-    recovery, plan_act executor) that need a structured submit
-    payload, not a free-form text answer.
-
-    Outcomes:
-    - terminal tool called → [Ok input]
-    - End_turn / Max_iterations / Failed without terminal call →
-      [Error agent_error]
-    - [Wait_for_user] propagates as the [Wait_for_user] exception
-      (caller decides how to suspend / resume). *)
-let run_until_terminal_tool ?(max_iterations = default_max_iterations)
-    ?(system_prompt = default_system_prompt)
-    ?(system_blocks : (string * string) list = [])
-    ?(name = "agent") ~terminal_tool_name ~user_query ~tools () :
-    (Yojson.Safe.t, agent_error) Result.t =
-  let ctx = make_ctx ~system_prompt ~system_blocks ~user_query ~tools () in
-  try
-    match
-      run_loop ~max_iterations ~terminal_tools:[ terminal_tool_name ]
-        ~name ~ctx ()
-    with
-    | Ok (_text, _ctx) ->
-        Error
-          (Plan_invalid
+(** Build a [Conversation] from the input. [Resume msgs] is rejected
+    if the trailing turn is a dangling tool_use — the caller must
+    close it (with a [Tool_result] for the pending tool_use_id, or
+    {!Conversation.close_dangling_with_ack}) before calling execute.
+    This avoids silently ack-closing user-facing pauses (ask_user). *)
+let conversation_of_input (input : input) :
+    (Conversation.t, string) Result.t =
+  match input with
+  | Fresh q -> Ok (Conversation.push_user_text Conversation.empty q)
+  | Resume msgs ->
+      (match Conversation.of_messages msgs with
+       | Error _ as e -> e
+       | Ok conv when Conversation.is_dangling conv ->
+           let names =
+             String.concat "," (Conversation.dangling_tool_use_names conv)
+           in
+           Error
              (Printf.sprintf
-                "%s ended turn without calling %s — model lost the \
-                 protocol"
-                name terminal_tool_name))
-    | Error (e, _) -> Error e
-  with Task_terminal_called { input; _ } -> Ok input
+                "Resume: prior conversation has dangling tool_use(s) \
+                 [%s]; close them (Tool_result block, or \
+                 Conversation.close_dangling_with_ack) before calling \
+                 execute"
+                names)
+       | Ok conv -> Ok conv)
 
-(** Multi-turn entry point. Seeds with [messages], runs the loop, and
-    returns an [session_result] carrying the updated history (including
-    any pending ask_user tool_use). *)
-let run_session ?max_iterations ?system_prompt ?system_blocks ~messages
-    ~tools () : session_result =
-  let final_messages ctx =
-    Conversation.to_messages (Context.conversation ctx)
-  in
-  (* A persisted session file (or memory blob) can be corrupt — strict
-     alternation broken, dangling tool_uses without matching results,
-     etc. Return [Outcome_failed] with a typed [Plan_invalid] instead
-     of [failwith]'ing — callers can recover (delete + restart) rather
-     than the whole process crashing. *)
-  match Conversation.of_messages messages with
-  | Error err ->
-      Outcome_failed
+let input_messages_for_diagnostic = function
+  | Fresh _ -> []
+  | Resume m -> m
+
+let terminal_tools_of_spec (spec : Agent_spec.t) : string list =
+  match spec.terminal with
+  | Agent_spec.Free_text -> []
+  | Agent_spec.Tool { name } -> [ name ]
+
+(** No-handler execute: performs Pause/Terminal effects through to
+    the outer fiber. Caller installs the handler. *)
+let execute_raw ~(spec : Agent_spec.validated) ~(input : input) : output =
+  let inner = spec.spec in
+  let filtered_tools = spec.visible_tools in
+  let terminal_tools = terminal_tools_of_spec inner in
+  match conversation_of_input input with
+  | Error msg ->
+      Failed
         {
           reason =
             Plan_invalid
-              ("run_session: malformed input messages — " ^ err);
-          messages;
+              ("Agent.execute: malformed input messages — " ^ msg);
+          messages = input_messages_for_diagnostic input;
         }
   | Ok conv ->
       let ctx =
-        Context.empty
-        |> Context.with_tools tools
-        |> Context.apply_system
-             ~system_prompt:
-               (Option.value system_prompt
-                  ~default:default_system_prompt)
-             ?system_blocks
-        |> Context.with_conversation conv
+        let base =
+          Context.empty
+          |> Context.with_tools filtered_tools
+          |> Context.apply_system ~system_prompt:inner.system_prompt
+               ~system_blocks:inner.system_blocks
+          |> Context.with_conversation conv
+        in
+        List.fold_left
+          (fun c (tag, body) -> Context.with_env ~tag ~body c)
+          base inner.env
       in
-      (try
-         match run_loop ?max_iterations ~ctx () with
-         | Ok (answer, ctx) ->
-             Outcome_done
-               { answer; final_messages = final_messages ctx }
-         | Error (reason, ctx) ->
-             Outcome_failed { reason; messages = final_messages ctx }
-       with Wait_for_user { tool_use_id; question; ctx_so_far } ->
-         Outcome_waiting
-           {
-             tool_use_id;
-             question;
-             messages = final_messages ctx_so_far;
-           })
-  (* [Governor.Governor_aborted] escapes through to the top-level
-     invoker, which catches via [Protection.catch_protection_errors]. *)
+      let final_messages c =
+        Conversation.to_messages (Context.conversation c)
+      in
+      (match
+         run_loop ~max_iterations:inner.max_iters
+           ~strategy:inner.strategy ~terminal_tools
+           ~force_terminal_in_last_n:inner.force_terminal_in_last_n
+           ~name:inner.name ~ctx ()
+       with
+       | Ok (answer, ctx) -> Done { answer; messages = final_messages ctx }
+       | Error (reason, ctx) -> Failed { reason; messages = final_messages ctx })
+
+(** Default-handler execute: wraps [execute_raw] with the pause →
+    Waiting / terminal → Terminal_tool translator AND converts
+    [Llm_error.Llm_api_error] exceptions into [Failed] outputs. The
+    exception conversion is what lets workflow / plan-act recovery
+    layers see LLM API failures as data ([Result.Error]) — without
+    it, the exception flies past every workflow combinator
+    ([with_retry] / [recover] / etc. only catch [Result.Error], not
+    exceptions) all the way to [Protection.catch_protection_errors]
+    and kills the whole run. [Governor.Governor_aborted] is a
+    global abort signal and is intentionally NOT caught here — it
+    propagates to Protection so the run terminates cleanly. *)
+let execute ~(spec : Agent_spec.validated) ~(input : input) : output =
+  let final_messages c =
+    Conversation.to_messages (Context.conversation c)
+  in
+  try
+    Effect.Deep.try_with
+      (fun () -> execute_raw ~spec ~input)
+      ()
+      {
+        effc =
+          (fun (type a) (eff : a Effect.t) ->
+            match eff with
+            | Effects.Pause { tool_use_id; question; ctx_so_far } ->
+                Some
+                  (fun (_k : (a, _) Effect.Deep.continuation) ->
+                    Waiting
+                      {
+                        tool_use_id;
+                        question;
+                        messages = final_messages ctx_so_far;
+                      })
+            | Effects.Terminal { tool_name; payload; ctx_so_far } ->
+                Some
+                  (fun (_k : (a, _) Effect.Deep.continuation) ->
+                    Terminal_tool
+                      {
+                        name = tool_name;
+                        payload;
+                        messages = final_messages ctx_so_far;
+                      })
+            | _ -> None);
+      }
+  with Llm_error.Llm_api_error e ->
+    Failed
+      {
+        reason = Llm_call_failed (Llm_error.pp e);
+        messages = input_messages_for_diagnostic input;
+      }
+
+(* ===== Output helpers ===== *)
+
+let expect_done ~name (out : output) :
+    (string * message list, agent_error) Result.t =
+  match out with
+  | Done { answer; messages } -> Ok (answer, messages)
+  | Failed { reason; _ } -> Error reason
+  | Terminal_tool { name = tool_name; _ } ->
+      Error
+        (Plan_invalid
+           (Printf.sprintf
+              "%s: expected free-text answer but model called terminal \
+               tool %S"
+              name tool_name))
+  | Waiting { question; _ } ->
+      Error
+        (Plan_invalid
+           (Printf.sprintf
+              "%s: model unexpectedly called ask_user (%s) — chat-shaped \
+               flow only"
+              name question))
+

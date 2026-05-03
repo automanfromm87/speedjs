@@ -187,12 +187,16 @@ let test_llm_handler_install_intercepts_effect () =
   in
   let result =
     Llm_handler.install inner (fun () ->
-        Handlers.silent (fun () -> Agent.run ~user_query:"test" ~tools:[] ()))
+        Handlers.silent (fun () ->
+            Agent.execute ~spec:(Specs.chat ~tools:[] ())
+              ~input:(Agent.Fresh "test")))
   in
   (match result with
-  | Ok "from chain" -> ()
-  | Ok s -> failwith ("unexpected answer: " ^ s)
-  | Error e -> failwith ("unexpected error: " ^ agent_error_pp e));
+  | Agent.Done { answer = "from chain"; _ } -> ()
+  | Agent.Done { answer; _ } -> failwith ("unexpected answer: " ^ answer)
+  | Agent.Failed { reason; _ } ->
+      failwith ("unexpected error: " ^ agent_error_pp reason)
+  | _ -> failwith "unexpected output");
   (match !captured with
   | Some args ->
       assert (List.length args.messages = 1);

@@ -83,35 +83,21 @@ let build_tools ~mcp_tools ~skill_tools
     Speedjs.Sub_agent.make_delegate_tool ~tools_for_subagent:subagent_base
   in
   let subagent_tools = subagent_base @ [ serial_delegate ] in
+  (* parallel_delegate's child stack uses [Runtime.fork_child_config]
+     plus a per-branch log prefix (so concurrent sub-agents' lines are
+     distinguishable in the shared sink). [Workflow.parallel] picks up
+     the unprefixed wrapper that [Runtime.install] sets automatically. *)
   let build_child_stack ~prefix ~child_cost:_ thunk =
-    let initial_parent_id =
-      Speedjs.Trace.current_parent runtime_config.tracer
-    in
-    let child_tracer =
-      Speedjs.Trace.fork ~parent:runtime_config.tracer ~initial_parent_id ()
-    in
-    (* Share the PARENT's cost_state so [max_cost_usd] / [max_steps] caps
-       account for child spend in real time, not just after Domain.join.
-       [cost_state_add] is mutex-guarded so concurrent LLM finishes
-       from multiple Domains don't race on the counters. [child_cost]
-       is ignored and kept only to preserve the existing signature
-       [Parallel_subagent.make_delegate_tool] expects.
-
-       [tracer] is forked per-Domain so each Domain owns its push/pop
-       stack (avoiding races) but writes to the parent's emit sink. *)
+    let base_child = Speedjs.Runtime.fork_child_config runtime_config in
     let child_config : Speedjs.Runtime.config =
       {
-        runtime_config with
+        base_child with
         on_log =
           (fun line ->
             runtime_config.on_log (Printf.sprintf "[%s] %s" prefix line));
-        on_text_delta = (fun _ -> ());
-        tape_path = None;
-        crash_after = None;
-        tracer = child_tracer;
       }
     in
-    Speedjs.Runtime.install ~tools:subagent_tools ~config:child_config thunk
+    Speedjs.Runtime.install ~config:child_config thunk
   in
   let parallel_delegate =
     Speedjs.Parallel_subagent.make_delegate_tool
@@ -176,14 +162,21 @@ let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
       | None -> Speedjs.Trace.make_noop ()
       | Some path -> Speedjs.Trace.make_file_writer path);
     on_event = (fun _ -> ());
+    chaos =
+      {
+        Speedjs.Chaos.default with
+        seed = args.chaos_seed;
+        llm_failure_rate = args.chaos_llm;
+        tool_failure_rate = args.chaos_tool;
+      };
   }
 
 (** Compose runtime + run thunk. Thin wrapper around
     [Speedjs.Runtime.install]. *)
-let make_runtime (args : Args.t) ~tools ~model ~cost ~on_log ~on_text_delta
+let make_runtime (args : Args.t) ~model ~cost ~on_log ~on_text_delta
     : (unit -> 'a) -> 'a =
  fun thunk ->
   let config =
     runtime_config_of_args args ~model ~cost ~on_log ~on_text_delta
   in
-  Speedjs.Runtime.install ~tools ~config thunk
+  Speedjs.Runtime.install ~config thunk

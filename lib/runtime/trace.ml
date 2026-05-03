@@ -164,6 +164,15 @@ type capture_result = {
 let ok_capture ~output ~tokens ~cost_delta =
   { output; tokens; cost_delta; ok = true; error = None }
 
+let fail_capture ~error =
+  {
+    output = "";
+    tokens = zero_tokens;
+    cost_delta = 0.0;
+    ok = false;
+    error = Some error;
+  }
+
 (** Run [f ()] inside a span. [capture] inspects [f]'s return value AFTER
     the inner call to extract output / tokens / cost / ok / error. On
     exception, emits a failed frame and re-raises. *)

@@ -35,17 +35,46 @@ let ensure_dir dir =
   if dir <> "" && dir <> "." && dir <> "/" && not (Sys.file_exists dir) then
     ignore (Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dir)))
 
+(** Atomic write: serialise to a sibling temp file, fsync the file,
+    [Unix.rename] over the target, then fsync the parent directory.
+    POSIX guarantees the rename is atomic; the directory fsync makes
+    that rename durable across power loss (without it, the rename's
+    metadata can be lost on crash even after the file fsync). *)
+let fsync_dir path =
+  try
+    let fd = Unix.openfile path [ Unix.O_RDONLY ] 0 in
+    Fun.protect
+      ~finally:(fun () -> try Unix.close fd with Unix.Unix_error _ -> ())
+      (fun () ->
+        try Unix.fsync fd with Unix.Unix_error _ -> ())
+  with Unix.Unix_error _ -> ()
+
 let write_all path content =
   try
-    ensure_dir (Filename.dirname path);
-    let oc = open_out path in
+    let dir = Filename.dirname path in
+    ensure_dir dir;
+    let basename = Filename.basename path in
+    let tmp =
+      Filename.concat dir
+        (Printf.sprintf ".%s.tmp.%d" basename (Unix.getpid ()))
+    in
+    let oc = open_out tmp in
     Fun.protect
-      ~finally:(fun () -> close_out_noerr oc)
+      ~finally:(fun () ->
+        if Sys.file_exists tmp then
+          try Sys.remove tmp with _ -> ())
       (fun () ->
         output_string oc content;
+        flush oc;
+        (try Unix.fsync (Unix.descr_of_out_channel oc)
+         with Unix.Unix_error _ -> ());
+        close_out_noerr oc;
+        Unix.rename tmp path;
+        fsync_dir dir;
         Ok (String.length content))
   with
   | Sys_error msg -> Error msg
+  | Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
   | e -> Error (Printexc.to_string e)
 
 let list_dir_real path =

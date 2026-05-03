@@ -85,15 +85,15 @@ val with_tracing : tracer:Trace.tracer -> t -> t
 (* ===== Install ===== *)
 
 (** Install the chain as an effect handler around [thunk]. Catches
-    [Effects.Tool_calls]; single-tool calls re-install the handler
-    around invocation so [delegate]-style tools can perform their own
-    effects through the outer stack.
+    [Effects.Tool_calls]; the registry is carried in the effect
+    payload so the spec/context decides what tools are dispatchable
+    (the runtime is registry-agnostic).
 
     Emits [Governor.Tick] events ([Tool_started] / [Tool_finished] /
     [Tool_timeout]) on the main fiber before/after dispatch — worker
     threads can't perform effects, so tick emission can't live inside a
     chain middleware. *)
-val install : tools:tool_def list -> t -> (unit -> 'a) -> 'a
+val install : t -> (unit -> 'a) -> 'a
 
 (* ===== Building blocks (also reused by [Checkpoint]) ===== *)
 

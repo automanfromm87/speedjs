@@ -17,4 +17,5 @@ let () =
   Test_agent_algebra.run ();
   Test_cache_stability.run ();
   Test_stability.run ();
+  Test_chaos.run ();
   print_endline "\nAll tests passed.\n"

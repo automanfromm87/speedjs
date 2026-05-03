@@ -1,4 +1,4 @@
 (executables
- (names main algebra_demo)
- (public_names speedjs algebra_demo)
+ (names main algebra_demo agent_creation_demo)
+ (public_names speedjs algebra_demo agent_creation_demo)
  (libraries speedjs))

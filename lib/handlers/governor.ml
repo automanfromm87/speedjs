@@ -122,6 +122,9 @@ end
 
 type _ Effect.t += Tick : Event.t -> unit Effect.t
 
+let safe_tick ev =
+  try Effect.perform (Tick ev) with Effect.Unhandled _ -> ()
+
 exception Governor_aborted of {
   limit : string;
   reason : string;
@@ -272,8 +275,17 @@ let observe state limits event =
   | Event.Tool_started { name; input_digest; _ } ->
       cost_state_inc_tool_call state.cost;
       check_tool_calls state limits;
-      check_repeated state limits (name ^ ":" ^ input_digest)
-  | Event.Tool_finished _ -> ()
+      check_repeated state limits (name ^ ":" ^ input_digest);
+      (* Wall-time check on tool start so a long bash / MCP / network
+         tool can't sneak past the cap and only get aborted at the
+         next iteration. The check is cheap (one snapshot + clock
+         read) so it's worth running at every tool boundary. *)
+      check_wall_time state limits
+  | Event.Tool_finished _ ->
+      (* Same rationale: a tool that ran 10 minutes still fires an
+         abort here at finish, in case Tool_started was missed (e.g.,
+         tool emitted no Started tick because of a custom handler). *)
+      check_wall_time state limits
   | Event.Tool_timeout _ ->
       (* Observation only. The tool itself decided to bail (or measured
          out of its declared timeout). Useful via [on_tick] for warnings. *)

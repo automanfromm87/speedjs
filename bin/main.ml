@@ -39,7 +39,7 @@ let () =
   in
   let system_blocks = Setup.build_system_blocks ~skill_index in
   let run_with_runtime thunk =
-    Speedjs.Runtime.install ~tools ~config:runtime_config thunk
+    Speedjs.Runtime.install ~config:runtime_config thunk
   in
 
   let exit_code =

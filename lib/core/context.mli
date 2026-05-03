@@ -79,25 +79,43 @@ val push_user_text : string -> t -> t
 (* ===== Materialization strategy ===== *)
 
 module Strategy : sig
-  type t = message list -> message list
+  (** A materialization strategy is pure data: each variant + its
+      parameters fully determines behavior, so strategies can be
+      shown, compared, and (for data-only variants) serialized.
 
-  (** No-op: messages pass through unchanged. *)
+      [Sliding_window_at]'s cut anchor is derived from the current
+      message-list length via a closed-form formula. When the list
+      shrinks (e.g. [Plan_act]'s [Memory.restore] after a failed
+      task), the anchor recomputes from the smaller [n]. *)
+  type t =
+    | Flat
+    | Sliding_window of { keep_recent : int }
+    | Sliding_window_at of { trigger_at : int; keep_recent : int }
+    | Compacted of {
+        compact_at : int;
+        keep_recent : int;
+        compactor : message list -> string;
+            (** The compactor function is the only opaque field —
+                summarisation is intrinsically a function. Other
+                variants are fully data. *)
+      }
+
+  (** Apply the strategy to a message list. Used by
+      [Context.to_llm_args] internally; most callers don't call
+      directly. *)
+  val apply : t -> message list -> message list
+
+  (** Human-readable description, suitable for [Agent_spec.show]. The
+      data variants render their parameters; [Compacted]'s compactor
+      shows as [<fun>]. *)
+  val label : t -> string
+
+  (** Convenience aliases for the variants. [flat] / [sliding_window
+      ~keep_recent] / [sliding_window_at ~trigger_at ~keep_recent] /
+      [compacted ~compact_at ~keep_recent ~compactor]. *)
   val flat : t
-
-  (** Keep the LAST [keep_recent] messages, drop older ones. May break
-      Conversation invariants — boundary [validate] is the safety net.
-      Trims on EVERY call once exceeded — invalidates prompt cache
-      every time. Use [sliding_window_at] when cache matters. *)
   val sliding_window : keep_recent:int -> t
-
-  (** Soft-trigger sliding window: only trim once messages exceed
-      [trigger_at], then drop down to [keep_recent]. The headroom
-      preserves cache stability across the calls in between. *)
   val sliding_window_at : trigger_at:int -> keep_recent:int -> t
-
-  (** Replace oldest messages with a single summarized User turn when
-      total exceeds [compact_at]. [compactor] is invoked on the
-      to-be-summarized prefix; typical impls call an LLM. *)
   val compacted :
     compact_at:int ->
     keep_recent:int ->

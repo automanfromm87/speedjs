@@ -51,7 +51,7 @@ let mock ~(llm_responses : llm_response list)
                   | r :: rest ->
                       pending_llm := rest;
                       continue k r)
-          | Effects.Tool_calls uses ->
+          | Effects.Tool_calls (_tools, uses) ->
               Some
                 (fun (k : (a, _) continuation) ->
                   let lookup name =

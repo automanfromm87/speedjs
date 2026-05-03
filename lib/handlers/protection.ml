@@ -35,13 +35,18 @@ let catch_protection_errors (f : unit -> Types.agent_result) :
   | Llm_error.Llm_api_error err ->
       Error (Types.Llm_call_failed (Llm_error.pp err))
 
-(** Outcome-flavored variant for session mode. *)
-let catch_protection_errors_outcome (f : unit -> Types.session_result) :
-    Types.session_result =
+(** [Agent.output]-flavored variant for the chat / session mode. *)
+let catch_protection_errors_output (f : unit -> Agent.output) : Agent.output =
   try f () with
   | Governor.Governor_aborted { limit; reason } ->
-      Outcome_failed
-        { reason = Types.Governor_aborted { limit; reason }; messages = [] }
+      Agent.Failed
+        {
+          reason = Types.Governor_aborted { limit; reason };
+          messages = [];
+        }
   | Llm_error.Llm_api_error err ->
-      Outcome_failed
-        { reason = Types.Llm_call_failed (Llm_error.pp err); messages = [] }
+      Agent.Failed
+        {
+          reason = Types.Llm_call_failed (Llm_error.pp err);
+          messages = [];
+        }

@@ -1,103 +1,50 @@
 (** Plan-Act flow with helix-style resilience and persistent executor memory.
 
-    Phases:
-      SURVEY     → optional WorkspaceSurveyor scan (when [~working_dir] is set)
-      PLANNING   → planner produces ordered task list (sees workspace brief)
-      EXECUTING  → loop tasks; each task is one [Agent.run_for_task] call
-                   that EXTENDS the executor's accumulated message history
-                   instead of starting fresh. Early tasks' tool_calls become
-                   cache prefix for later ones; the model "remembers".
-      RECOVERING → planner picks REPLAN or ABANDON when retries are exhausted
-      SUMMARIZING → executor synthesizes the final answer
+    The orchestration is expressed as a recursive {!Workflow.t}:
 
-    Persistent memory ([~memory_dir]):
-      - executor.json holds the executor's accumulated [message list]
-      - loaded on startup (so a continue.sh-style follow-up run picks up
-        where the last one left off)
-      - saved after every successful task
-      - on task failure: rolled back to the pre-task checkpoint length
-        (the failed ReAct trail would poison the next attempt)
+    {ol
+    {- {!plan_or_resume_flow} produces an [initial_plan] (planner LLM
+       call, or resumed [plan_state.json]).}
+    {- {!drive_flow} walks the [pending] task list. Each task runs
+       through {!run_task_flow} (with retry + memory checkpoint /
+       rollback). On success → bind result, recurse with [rest]. On
+       failure → {!handle_failure_flow} consults {!Planner.recover}
+       and pivots [pending] (replan / split / skip / abandon).}
+    {- {!finalize_flow} produces the synthesized answer (summarizer
+       LLM call, or skip-summarizer formatted dump).}}
 
-    Failure handling (4 layers, helix-inspired):
-      1. [max_iterations] cap inside one task's ReAct loop
-      2. submit_task_result with success=false → caller knows the task failed
-      3. Per-task retry (default 1 retry on failure)
-      4. Plan recovery (planner replans or abandons)
-
-    Reuses the same effect handler stack — every LLM call (surveyor, planner,
-    recovery, executor, summarizer) goes through [Effects.Llm_complete], so
-    cost / streaming / checkpoint / loop_guard / budget all work transparently. *)
+    Persistence is side-effect at bind boundaries: {!Memory} +
+    {!Plan_state} writes happen between binds via [Workflow.action].
+    All LLM calls go through [Effects.Llm_complete], so cost / tape /
+    cache / retry middleware applies transparently to every leaf. *)
 
 open Types
 
-(* ===== submit_task_result: terminal tool for explicit task closure =====
+(** Structured payload submitted via [submit_task_result]. *)
+type task_submit = {
+  ts_success : bool;
+  ts_result : string;
+  ts_error : string;
+}
 
-   Synthetic tool that lets the executor signal task completion (or
-   definitive failure) explicitly, instead of relying on
-   stop_reason=End_turn. The handler is never executed — the agent loop
-   intercepts via [terminal_tools] and raises [Task_terminal_called]
-   before tool dispatch. *)
+(** Outcome of a single per-task ReAct run. *)
+type task_run_outcome =
+  | Task_done_explicit of {
+      submit : task_submit;
+      messages : message list;
+    }
+  | Task_done_implicit of {
+      answer : string;
+      messages : message list;
+    }
+  | Task_run_failed of { reason : agent_error; messages : message list }
+  | Task_run_waiting of {
+      tool_use_id : Id.Tool_use_id.t;
+      question : string;
+      messages : message list;
+    }
 
-let submit_task_result_name = "submit_task_result"
-
-let submit_task_result_tool : tool_def =
-  {
-    (* Synthetic terminal tool: handler never invoked. *)
-    idempotent = true;
-    timeout_sec = None;
-    category = "meta";
-    capabilities = [ Terminal ];
-    allowed_modes = [ Executor; Subagent ];
-    classify_error = default_classify_error;
-    name = submit_task_result_name;
-    description =
-      "Submit the FINAL outcome for the current task. Call this exactly \
-       once when the task is fully complete (or has definitively failed \
-       and cannot be salvaged). The agent loop will end immediately after \
-       this call. Do NOT call any other tools in the same response.";
-    input_schema =
-      `Assoc
-        [
-          ("type", `String "object");
-          ( "properties",
-            `Assoc
-              [
-                ( "success",
-                  `Assoc
-                    [
-                      ("type", `String "boolean");
-                      ( "description",
-                        `String
-                          "true if the task was completed successfully; \
-                           false if it failed and cannot be salvaged" );
-                    ] );
-                ( "result",
-                  `Assoc
-                    [
-                      ("type", `String "string");
-                      ( "description",
-                        `String
-                          "Concise summary of what was accomplished (or \
-                           empty if success=false)" );
-                    ] );
-                ( "error",
-                  `Assoc
-                    [
-                      ("type", `String "string");
-                      ( "description",
-                        `String
-                          "Diagnostic explanation if success=false; empty \
-                           string when success=true" );
-                    ] );
-              ] );
-          ("required", `List [ `String "success"; `String "result" ]);
-        ];
-    handler =
-      (fun _ ->
-        Error
-          "submit_task_result is a terminal tool — its handler should \
-           never be invoked");
-  }
+let submit_task_result_name = Specs.submit_task_result_name
 
 let parse_task_submit (input : Yojson.Safe.t) : task_submit =
   match input with
@@ -111,27 +58,79 @@ let parse_task_submit (input : Yojson.Safe.t) : task_submit =
   | _ ->
       { ts_success = false; ts_result = ""; ts_error = "non-object input" }
 
-(** Run a single task with structured outcome.
+(** Translate one {!Agent.output} into a task-run outcome. The 4-way
+    mapping exists because plan-act distinguishes explicit submit
+    (with success/failure semantics) from implicit End_turn / from
+    structural failure / from pause-tool. *)
+let outcome_of_output (output : Agent.output) : task_run_outcome =
+  match output with
+  | Agent.Terminal_tool { name; payload; messages }
+    when name = submit_task_result_name ->
+      Task_done_explicit { submit = parse_task_submit payload; messages }
+  | Agent.Terminal_tool { name; messages; _ } ->
+      Task_run_failed
+        {
+          reason =
+            Plan_invalid
+              (Printf.sprintf
+                 "executor terminated on unexpected tool %S" name);
+          messages;
+        }
+  | Agent.Done { answer; messages } ->
+      Task_done_implicit { answer; messages }
+  | Agent.Failed { reason; messages } -> Task_run_failed { reason; messages }
+  | Agent.Waiting { tool_use_id; question; messages } ->
+      Task_run_waiting { tool_use_id; question; messages }
 
-    Adds [submit_task_result] to the tool list, instructs the model to
-    call it for explicit closure, returns a [task_run_outcome] that
-    distinguishes success/failure/waiting/structural-error.
+(** Build the resume conversation for an executor task: validate
+    [prior_messages], close any dangling [submit_task_result]
+    tool_use, append the new user query as a fresh User turn (or
+    merged with the ack). Returns the resume message list, or a
+    typed error if the prior history is malformed / its dangling
+    tool_use isn't [submit_task_result]. *)
+let build_resume_messages ~prior_messages ~user_query :
+    (message list, agent_error) Result.t =
+  match Conversation.of_messages prior_messages with
+  | Error msg ->
+      Error
+        (Plan_invalid
+           ("run_for_task: malformed prior_messages — " ^ msg))
+  | Ok conv when not (Conversation.is_dangling conv) ->
+      Ok (Conversation.to_messages
+            (Conversation.push_user_text conv user_query))
+  | Ok conv ->
+      let dangling = Conversation.dangling_tool_use_names conv in
+      if List.for_all (fun n -> n = submit_task_result_name) dangling then
+        Ok
+          (Conversation.to_messages
+             (Conversation.close_dangling_with_ack
+                ~ack:
+                  (Printf.sprintf
+                     "(%s acknowledged — proceeding to next task)"
+                     submit_task_result_name)
+                ~extra:[ Text user_query ] conv))
+      else
+        Error
+          (Plan_invalid
+             (Printf.sprintf
+                "run_for_task: prior_messages has dangling tool_use(s) \
+                 [%s] that don't match %s"
+                (String.concat "," dangling)
+                submit_task_result_name))
 
-    [prior_messages]: seed message history. The new task is appended as
-    a fresh user turn — or merged with synthetic Tool_results if the
-    prior turn ended with an unanswered submit_task_result tool_use
-    (preserves Anthropic's strict alternation). Pass [[]] for fresh
-    per-task context; pass the executor's accumulated memory for
-    helix-style continuity (early tasks' tool_calls become cache prefix
-    for later ones, and the model "remembers" what was done). *)
-let run_for_task ?(max_iterations = Agent.default_max_iterations)
-    ?(strategy = Context.Strategy.flat)
-    ?(system_prompt = Agent.default_system_prompt)
-    ?(system_blocks : (string * string) list = [])
-    ?(prior_messages : message list = [])
-    ?(env : (string * string) list = []) ~task_description ~tools () :
-    task_run_outcome =
-  let tools_with_submit = tools @ [ submit_task_result_tool ] in
+(** Workflow form of one task's ReAct run. Returns
+    [task_run_outcome] always wrapped in [Ok] (errors are encoded as
+    [Task_run_failed], not flow-level errors). *)
+(* Workflow-shaped wrappers for the two effect emit paths used by
+   the drive loop. They hide the [action (fun () -> Effect.perform ...)]
+   plumbing so the surrounding flow reads as a sequence of named
+   events. *)
+let log_event ev = Workflow.action (fun () -> Effect.perform (Effects.Event_log ev))
+let log_line s = Workflow.action (fun () -> Effect.perform (Effects.Log s))
+
+let task_attempt_flow ~spec ~prior_messages ~task_description :
+    task_run_outcome Workflow.t =
+  let open Workflow in
   let user_query =
     Printf.sprintf
       "%s\n\nWhen this task is fully complete, call the \
@@ -140,46 +139,24 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
        with success=false and an error explanation."
       task_description
   in
-  (* If [prior_messages] ends with a dangling submit_task_result tool_use
-     (executor memory across tasks), close it by merging a synthetic
-     Tool_result with the new task text into a single User turn.
+  match build_resume_messages ~prior_messages ~user_query with
+  | Error reason -> pure (Task_run_failed { reason; messages = prior_messages })
+  | Ok resume_messages ->
+      let+ output = leaf spec (Agent.Resume resume_messages) in
+      outcome_of_output output
 
-     If the prior history is corrupt (persisted memory was hand-edited
-     or written by an older incompatible version), surface as a
-     [Task_run_failed] outcome instead of crashing — the orchestrator
-     can decide to drop the memory and replan rather than tear the
-     whole process down. *)
-  match Conversation.of_messages prior_messages with
-  | Error msg ->
-      Task_run_failed
-        {
-          reason =
-            Plan_invalid
-              ("run_for_task: malformed prior_messages — " ^ msg);
-          messages = prior_messages;
-        }
-  | Ok initial_conv ->
-  let conv = initial_conv in
-  let conv =
-    if Conversation.is_dangling conv then
-      Conversation.close_dangling_with_ack
-        ~ack:"(submit_task_result acknowledged — proceeding to next task)"
-        ~extra:[ Text user_query ] conv
-    else Conversation.push_user_text conv user_query
-  in
-  let ctx =
-    let base =
-      Context.empty
-      |> Context.with_tools tools_with_submit
-      |> Context.apply_system ~system_prompt ~system_blocks
-      |> Context.with_conversation conv
-    in
-    List.fold_left
-      (fun c (tag, body) -> Context.with_env ~tag ~body c)
-      base env
-  in
-  let final_messages c =
-    Conversation.to_messages (Context.conversation c)
+(** Public single-task driver. Preserved for back-compat with tests
+    and any external caller. Internally delegates to the workflow form. *)
+let run_for_task ?(max_iterations = Agent.default_max_iterations)
+    ?(strategy = Context.Strategy.flat)
+    ?(system_prompt = Agent.default_system_prompt)
+    ?(system_blocks : (string * string) list = [])
+    ?(prior_messages : message list = [])
+    ?(env : (string * string) list = []) ~task_description ~tools () :
+    task_run_outcome =
+  let spec =
+    Specs.executor ~system_prompt ~system_blocks ~strategy
+      ~max_iters:max_iterations ~env ~tools ()
   in
   let capture (outcome : task_run_outcome) : Trace.capture_result =
     match outcome with
@@ -196,46 +173,26 @@ let run_for_task ?(max_iterations = Agent.default_max_iterations)
           cost_delta = 0.0;
           ok = submit.ts_success;
           error =
-            (if submit.ts_success then None
-             else Some submit.ts_error);
+            (if submit.ts_success then None else Some submit.ts_error);
         }
     | Task_done_implicit { answer; _ } ->
         Trace.ok_capture ~output:("implicit: " ^ answer)
           ~tokens:Trace.zero_tokens ~cost_delta:0.0
     | Task_run_failed { reason; _ } ->
-        let msg = agent_error_pp reason in
-        {
-          output = "";
-          tokens = Trace.zero_tokens;
-          cost_delta = 0.0;
-          ok = false;
-          error = Some msg;
-        }
+        Trace.fail_capture ~error:(agent_error_pp reason)
     | Task_run_waiting { question; _ } ->
         Trace.ok_capture ~output:("waiting on user: " ^ question)
           ~tokens:Trace.zero_tokens ~cost_delta:0.0
   in
   Trace.span_current ~kind:Trace.Plan_step ~name:"task"
     ~input_summary:task_description ~capture (fun () ->
-      try
-        match
-          Agent.run_loop ~max_iterations ~strategy
-            ~terminal_tools:[ submit_task_result_name ] ~ctx ()
-        with
-        | Ok (answer, ctx) ->
-            Task_done_implicit { answer; messages = final_messages ctx }
-        | Error (reason, ctx) ->
-            Task_run_failed { reason; messages = final_messages ctx }
+      match
+        Workflow.run
+          (task_attempt_flow ~spec ~prior_messages ~task_description)
       with
-      | Agent.Task_terminal_called { input; ctx_so_far; _ } ->
-          Task_done_explicit
-            {
-              submit = parse_task_submit input;
-              messages = final_messages ctx_so_far;
-            }
-      | Agent.Wait_for_user { tool_use_id; question; ctx_so_far } ->
-          Task_run_waiting
-            { tool_use_id; question; messages = final_messages ctx_so_far })
+      | Ok outcome -> outcome
+      | Error reason ->
+          Task_run_failed { reason; messages = prior_messages })
 
 let summarizer_system_prompt =
   {|You are a synthesizer. The user gave a goal. A plan was created and each \
@@ -262,7 +219,26 @@ let format_task_results plan results =
     in
     String.concat "\n\n" lines
 
-(** Synthesizer LLM call to produce a final answer. *)
+(** Synthesizer LLM call: one final call, no tools, free-text answer. *)
+let summarize_flow ~plan ~results : string Workflow.t =
+  let open Workflow in
+  let user_msg =
+    Printf.sprintf
+      "Goal:\n%s\n\nPlan: %s\n\nTask results:\n%s\n\nWrite the final answer."
+      plan.goal plan.title (format_task_results plan results)
+  in
+  of_thunk (fun () ->
+      let args : llm_call_args =
+        {
+          messages = [ user_text_message user_msg ];
+          tools = [];
+          system_override = Some summarizer_system_prompt;
+          tool_choice = Tc_auto;
+        }
+      in
+      let response = Effect.perform (Effects.Llm_complete args) in
+      Ok (Step.extract_final_text response.content))
+
 let summarize ~plan ~results () : agent_result =
   let capture (r : agent_result) : Trace.capture_result =
     match r with
@@ -270,43 +246,17 @@ let summarize ~plan ~results () : agent_result =
         Trace.ok_capture
           ~output:(if String.length answer > 200 then String.sub answer 0 200 ^ "..." else answer)
           ~tokens:Trace.zero_tokens ~cost_delta:0.0
-    | Error e ->
-        {
-          output = "";
-          tokens = Trace.zero_tokens;
-          cost_delta = 0.0;
-          ok = false;
-          error = Some (agent_error_pp e);
-        }
+    | Error e -> Trace.fail_capture ~error:(agent_error_pp e)
   in
   Trace.span_current ~kind:Trace.Phase ~name:"summarizer"
     ~input_summary:plan.goal ~capture (fun () ->
-  Effect.perform (Effects.Log "[summarizer] synthesizing final answer");
-  let user_msg =
-    Printf.sprintf
-      "Goal:\n%s\n\nPlan: %s\n\nTask results:\n%s\n\nWrite the final answer."
-      plan.goal plan.title (format_task_results plan results)
-  in
-  let args : llm_call_args =
-    {
-      messages = [ user_text_message user_msg ];
-      tools = [];
-      system_override = Some summarizer_system_prompt;
-      tool_choice = Tc_auto;
-    }
-  in
-  let response = Effect.perform (Effects.Llm_complete args) in
-  Ok (Step.extract_final_text response.content))
+      Effect.perform (Effects.Log "[summarizer] synthesizing final answer");
+      Workflow.run (summarize_flow ~plan ~results))
 
 let executor_memory_name = "executor"
 
 (* ===== Workspace brief ===== *)
 
-(** Survey the workspace and return [(env_blocks, planner_goal_prefix)].
-    The env block goes into the executor's [Context.env] (system-prompt
-    layer of the cache, shared across all tasks); the prefix is added to
-    the planner's goal so the planner sees the file layout while drafting
-    tasks. *)
 let survey_workspace ~working_dir : (string * string) list * string =
   match working_dir with
   | None -> ([], "")
@@ -325,35 +275,6 @@ let survey_workspace ~working_dir : (string * string) list * string =
         in
         (env, planner_prefix)
 
-(** Run one task against the executor's accumulated memory.
-
-    [env] blocks (e.g. workspace_brief) ride at the system-prompt layer
-    of the prompt cache, so they're shared across all tasks for free. *)
-let exec_one_task ~tools ~max_iterations ~strategy ~system_prompt
-    ~system_blocks ~env
-    ~(prior_messages : message list) ~current_task :
-    [ `Done of string * message list
-    | `Failed of string * message list ] =
-  match
-    run_for_task ~max_iterations ~strategy ~system_prompt ~system_blocks
-      ~prior_messages ~env
-      ~task_description:current_task.description ~tools ()
-  with
-  | Task_done_explicit { submit; messages } ->
-      if submit.ts_success then `Done (submit.ts_result, messages)
-      else
-        `Failed
-          ( (if submit.ts_error <> "" then submit.ts_error
-             else "task reported failure without details"),
-            messages )
-  | Task_done_implicit { answer; messages } -> `Done (answer, messages)
-  | Task_run_failed { reason; messages } ->
-      `Failed (agent_error_pp reason, messages)
-  | Task_run_waiting _ ->
-      `Failed
-        ( "task called ask_user — pause-tool not supported in plan-act mode",
-          prior_messages )
-
 (* ===== Configuration ===== *)
 
 type config = {
@@ -366,26 +287,11 @@ type config = {
   model : string;
   planner_system_prompt : string option;
   executor_system_prompt : string;
-      (** Base system prompt for each per-task executor. Defaults to
-          [Agent.default_system_prompt]. *)
   executor_system_blocks : (string * string) list;
-      (** Extension-contributed prompt fragments (skill index, memory
-          summary, ...). Each rendered as [<name>body</name>] after
-          the base, in registration order. *)
   executor_strategy : unit -> Context.Strategy.t;
-      (** Factory, not a [Strategy.t] value: stateful strategies (e.g.
-          [sliding_window_at]) carry a per-instance [cut_at] ref that
-          must be fresh per run. The factory is called once per
-          [run] invocation. *)
   restart : bool;
-      (** Ignore any persisted plan_state.json and replan from scratch. *)
 }
 
-(** Default executor strategy factory: soft-trigger sliding window.
-    The executor accumulates messages across tasks (helix-style memory)
-    and within each task — unbounded growth blows past 100K tokens on
-    long runs. Frozen cut anchor keeps the cached prompt prefix stable
-    between trims (~one trim per ~30 calls). *)
 let default_executor_strategy () =
   Context.Strategy.sliding_window_at ~trigger_at:60 ~keep_recent:30
 
@@ -405,350 +311,386 @@ let default_config =
     restart = false;
   }
 
-(** Top-level plan-act run.
+(* ===== Drive state =====
+   The drive loop's threaded state. [pending] is the remaining task
+   list; [acc] is the completed (in reverse). [recoveries] /
+   [prior_failures] track recovery cycles for the recovery planner's
+   self-awareness. *)
+type drive_state = {
+  pending : task list;
+  acc : (task * (string, string) result) list;
+  recoveries : int;
+  prior_failures : (string * string) list;
+}
 
-    [working_dir] enables [Workspace_surveyor] before planning. The
-    brief is injected into the planner's goal AND prepended to the
-    executor's first task message.
+(* ===== Drive environment (immutable per run) ===== *)
+type drive_env = {
+  config : config;
+  goal : string;
+  tools : tool_def list;
+  initial_plan : plan;
+  exec_mem : Memory.t;
+  exec_env : (string * string) list;
+  executor_strategy : Context.Strategy.t;
+}
 
-    [memory_dir] enables cross-run executor memory: messages are loaded
-    on startup (continue.sh-style resume) and persisted after each
-    successful task. *)
+let executor_spec env =
+  Specs.executor
+    ~system_prompt:env.config.executor_system_prompt
+    ~system_blocks:env.config.executor_system_blocks
+    ~strategy:env.executor_strategy
+    ~max_iters:env.config.max_iterations_per_task
+    ~env:env.exec_env ~tools:env.tools ()
+
+(* Renumber a fresh task list so its [index] continues after the
+   already-completed acc. Used by Replan / Split. *)
+let renumber_after ~acc_count ~offset tasks =
+  List.mapi
+    (fun i (t : task) -> { t with index = acc_count + offset + 1 + i })
+    tasks
+
+(* Persist the unified durable state: control plane (live plan,
+   pending, completed, recovery) + data plane (executor message
+   history) in one atomic write. The [tasks] field reflects the LIVE
+   plan (acc reversed + pending), not the original initial_plan. *)
+let persist_state env state =
+  match env.config.memory_dir with
+  | None -> ()
+  | Some dir ->
+      let live_tasks = List.rev_map fst state.acc @ state.pending in
+      let live_plan = { env.initial_plan with tasks = live_tasks } in
+      Plan_state.save ~dir
+        {
+          goal = env.goal;
+          plan = live_plan;
+          pending = state.pending;
+          completed_rev = state.acc;
+          recoveries = state.recoveries;
+          prior_failures = state.prior_failures;
+          executor_messages = Memory.to_messages env.exec_mem;
+        }
+
+(* ===== Single-task workflow with checkpoint + retry =====
+   Runs one task against the current executor memory:
+
+   - Take a Memory checkpoint (so failure rolls back the poisoned trail).
+   - Build the leaf attempt as a Workflow that re-reads memory on each
+     retry (lazy via [of_thunk]).
+   - On success: persist memory, log [Task_completed], return answer.
+   - On failure (retries exhausted): restore checkpoint, propagate err. *)
+let run_task_flow env task : string Workflow.t =
+  let open Workflow in
+  let spec = executor_spec env in
+  let cp = Memory.checkpoint env.exec_mem in
+  (* In-memory only: messages get persisted to disk in [persist_state]
+     atomically alongside the plan_state, so a crash between them
+     can't leave a split-brain "data advanced, control hasn't" state. *)
+  let commit_success ~messages ~result_preview answer =
+    let* () = action (fun () -> Memory.set env.exec_mem messages) in
+    let* () =
+      log_event
+        (Task_completed { index = task.index; result_preview })
+    in
+    pure answer
+  in
+  let one_attempt =
+    of_thunk (fun () ->
+        let prior = Memory.to_messages env.exec_mem in
+        Workflow.run
+          (let* outcome =
+             task_attempt_flow ~spec ~prior_messages:prior
+               ~task_description:task.description
+           in
+           match outcome with
+           | Task_done_explicit { submit = { ts_success = true; ts_result; _ }; messages } ->
+               commit_success ~messages ~result_preview:ts_result ts_result
+           | Task_done_explicit { submit = { ts_success = false; ts_error; _ }; _ } ->
+               of_result
+                 (Error
+                    (Plan_invalid
+                       (if ts_error <> "" then ts_error
+                        else "task reported failure without details")))
+           | Task_done_implicit { answer; messages } ->
+               commit_success ~messages ~result_preview:answer answer
+           | Task_run_failed { reason; _ } -> of_result (Error reason)
+           | Task_run_waiting _ ->
+               of_result
+                 (Error
+                    (Plan_invalid
+                       "task called ask_user — pause-tool not supported in \
+                        plan-act mode"))))
+  in
+  let with_rollback =
+    recover one_attempt (fun err ->
+        let* () = action (fun () -> Memory.restore env.exec_mem cp) in
+        let* () =
+          log_event
+            (Task_failed
+               { index = task.index; error = agent_error_pp err; attempt = 0 })
+        in
+        of_result (Error err))
+  in
+  with_retry ~max_attempts:(env.config.max_task_retries + 1) with_rollback
+
+(* ===== Recovery flow =====
+   Consult the recovery planner. Returns a {!Planner.recovery_decision}
+   on success; the caller pattern-matches and pivots [drive_state]. *)
+let recovery_flow env state task err :
+    Planner.recovery_decision Workflow.t =
+  let completed_descs =
+    List.rev_map (fun (t, _) -> t.description) state.acc
+  in
+  let remaining_descs = List.map (fun (t : task) -> t.description) state.pending in
+  Workflow.of_thunk (fun () ->
+      Planner.recover ~research_tools:env.tools
+        ~prior_failures:(List.rev state.prior_failures)
+        ~cycle_index:state.recoveries
+        ~max_cycles:env.config.max_recoveries
+        ~goal:env.goal ~completed:completed_descs ~failed_task:task
+        ~failed_error:err ~remaining:remaining_descs ())
+
+(* ===== Drive loop =====
+   Recursive workflow: each call either finalizes or runs one task and
+   recurses with an updated state. *)
+let rec drive_flow env state : string Workflow.t =
+  let open Workflow in
+  let* () = action (fun () -> persist_state env state) in
+  match state.pending with
+  | [] -> finalize_flow env state
+  | task :: rest ->
+      let* () =
+        let total = List.length state.pending + List.length state.acc in
+        log_event
+          (Task_started
+             { index = task.index; total; description = task.description })
+      in
+      let* outcome = attempt (run_task_flow env task) in
+      (match outcome with
+       | Ok answer ->
+           drive_flow env
+             {
+               state with
+               pending = rest;
+               acc = (task, Ok answer) :: state.acc;
+             }
+       | Error err ->
+           handle_failure_flow env state task err rest)
+
+and handle_failure_flow env state task err rest :
+    string Workflow.t =
+  let open Workflow in
+  let err_str = agent_error_pp err in
+  let* () =
+    log_event
+      (Recovery_invoked
+         {
+           failed_index = task.index;
+           failed_error = err_str;
+           cycle = state.recoveries;
+         })
+  in
+  let new_acc = (task, Error err_str) :: state.acc in
+  let acc_count = List.length state.acc in
+  (* Apply a recovery decision: log + recurse with the pivoted state.
+     [pending] is the only thing that varies across decisions; the
+     rest of the new state is shared. *)
+  let pivot ~decision ~details ~pending =
+    let* () =
+      log_event (Recovery_decided { decision; details })
+    in
+    drive_flow env
+      {
+        pending;
+        acc = new_acc;
+        recoveries = state.recoveries + 1;
+        prior_failures = (task.description, err_str) :: state.prior_failures;
+      }
+  in
+  if state.recoveries >= env.config.max_recoveries then
+    pivot ~decision:"BUDGET_EXHAUSTED"
+      ~details:
+        (Printf.sprintf "%d/%d cycles used" state.recoveries
+           env.config.max_recoveries)
+      ~pending:rest
+  else
+    let* decision_result = attempt (recovery_flow env state task err_str) in
+    match decision_result with
+    | Error _ ->
+        (* Recovery planner itself failed → treat as Skip to make
+           progress without infinite loop. *)
+        pivot ~decision:"SKIP" ~details:"recovery planner failed"
+          ~pending:rest
+    | Ok Planner.Abandon ->
+        pivot ~decision:"ABANDON"
+          ~details:"surfacing failure to summarizer" ~pending:[]
+    | Ok (Planner.Replan new_tasks) ->
+        pivot ~decision:"REPLAN"
+          ~details:
+            (Printf.sprintf "%d new task(s) replace failed + remaining"
+               (List.length new_tasks))
+          ~pending:(renumber_after ~acc_count ~offset:0 new_tasks)
+    | Ok (Planner.Split new_tasks) ->
+        let split_count = List.length new_tasks in
+        let split_renumbered =
+          renumber_after ~acc_count ~offset:0 new_tasks
+        in
+        let rest_renumbered =
+          renumber_after ~acc_count ~offset:split_count rest
+        in
+        pivot ~decision:"SPLIT"
+          ~details:
+            (Printf.sprintf
+               "failed task -> %d sub-task(s); %d remaining stay"
+               split_count (List.length rest))
+          ~pending:(split_renumbered @ rest_renumbered)
+    | Ok Planner.Skip ->
+        pivot ~decision:"SKIP"
+          ~details:
+            (Printf.sprintf "%d remaining task(s) continue"
+               (List.length rest))
+          ~pending:rest
+
+and finalize_flow env state : string Workflow.t =
+  let open Workflow in
+  let results = List.map snd (List.rev state.acc) in
+  let summary_plan =
+    { env.initial_plan with tasks = List.rev_map fst state.acc }
+  in
+  if env.config.skip_summarizer then
+    let header =
+      if List.exists Result.is_error results then
+        Printf.sprintf "Plan: %s (with failures)" env.initial_plan.title
+      else Printf.sprintf "Plan: %s" env.initial_plan.title
+    in
+    pure
+      (Printf.sprintf "%s\n\n%s" header
+         (format_task_results summary_plan results))
+  else summarize_flow ~plan:summary_plan ~results
+
+(* ===== Plan / resume ===== *)
+
+let plan_or_resume_flow ~config ~goal ~goal_for_planner ~tools
+    ~resume_state : plan Workflow.t =
+  let open Workflow in
+  match resume_state with
+  | Some s ->
+      let* () =
+        log_line
+          (Printf.sprintf
+             "[plan_act] resuming saved state: %d/%d tasks completed, %d \
+              recoveries used"
+             (List.length s.Plan_state.completed_rev)
+             (List.length s.plan.tasks)
+             s.recoveries)
+      in
+      pure s.plan
+  | None ->
+      of_thunk (fun () ->
+          Planner.plan ?system_prompt:config.planner_system_prompt
+            ~research_tools:tools ~goal:goal_for_planner ())
+  |> fun plan_flow ->
+  let* p = plan_flow in
+  let* () =
+    action (fun () ->
+        Effect.perform
+          (Effects.Event_log
+             (Plan_decomposed
+                {
+                  goal_preview = p.title;
+                  n_tasks = List.length p.tasks;
+                }));
+        List.iter
+          (fun (t : task) ->
+            Effect.perform
+              (Effects.Log
+                 (Printf.sprintf "  %d. %s" t.index t.description)))
+          p.tasks;
+        ignore goal)
+  in
+  pure p
+
+(** Top-level plan-act run, expressed as a single workflow value. *)
 let run ?(config = default_config) ~goal ~tools () : agent_result =
-  (* Outer Phase span so every LLM/Tool/Plan_step inside this run gets
-     parented under one root in the trace, instead of the planner LLM,
-     each plan_step, recovery LLM, and summarizer all appearing as
-     sibling top-level frames. *)
   let capture (r : agent_result) : Trace.capture_result =
     match r with
     | Ok answer ->
         Trace.ok_capture
           ~output:(if String.length answer > 200 then String.sub answer 0 200 ^ "..." else answer)
           ~tokens:Trace.zero_tokens ~cost_delta:0.0
-    | Error e ->
-        {
-          output = "";
-          tokens = Trace.zero_tokens;
-          cost_delta = 0.0;
-          ok = false;
-          error = Some (agent_error_pp e);
-        }
+    | Error e -> Trace.fail_capture ~error:(agent_error_pp e)
   in
   Trace.span_current ~kind:Trace.Phase ~name:"plan_act"
     ~input_summary:goal ~capture (fun () ->
-  let { skip_summarizer; max_iterations_per_task = max_iter;
-        max_task_retries; max_recoveries; working_dir; memory_dir;
-        model; planner_system_prompt;
-        executor_system_prompt; executor_system_blocks;
-        executor_strategy = executor_strategy_factory;
-        restart } = config in
-  (* Construct a fresh strategy ONCE per run. Sliding-window-style
-     strategies are stateful (cut_at ref); the same closure must be
-     reused across every executor LLM call within a run so the cache
-     prefix stays stable, but a NEW closure must be made for the next
-     run. *)
-  let executor_strategy = executor_strategy_factory () in
-
-  (* Step 1: optional workspace survey. One LLM call; the brief is
-     reused across planner + executor so marginal value is high.
-     Executor receives env blocks (system-prompt layer cache); planner
-     gets the brief inlined in its goal text since its system prompt is
-     already specialized. *)
-  let exec_env, planner_prefix = survey_workspace ~working_dir in
-
-  (* Step 2a: try to resume from a previous interrupted run before
-     paying for the planner LLM call. plan_state.json lives next to
-     executor.json in [memory_dir]. *)
-  let resume_state =
-    if restart then None
-    else
-      match memory_dir with
-      | Some dir -> Plan_state.try_load ~dir ~goal
-      | None -> None
-  in
-
-  (* Step 2b: plan (or skip if resuming). *)
-  let goal_for_planner =
-    if planner_prefix = "" then goal
-    else planner_prefix ^ "\n\n--- USER GOAL ---\n" ^ goal
-  in
-  let plan_result =
-    match resume_state with
-    | Some s ->
-        Effect.perform
-          (Effects.Log
-             (Printf.sprintf
-                "[plan_act] resuming saved state: %d/%d tasks completed, %d \
-                 recoveries used"
-                (List.length s.Plan_state.completed_rev)
-                (List.length s.plan.tasks)
-                s.recoveries));
-        Ok s.plan
-    | None ->
-        Planner.plan ?system_prompt:planner_system_prompt
-          ~research_tools:tools ~goal:goal_for_planner ()
-  in
-  match plan_result with
-  | Error e -> Error e
-  | Ok initial_plan ->
-      Effect.perform
-        (Effects.Event_log
-           (Plan_decomposed
-              {
-                goal_preview = initial_plan.title;
-                n_tasks = List.length initial_plan.tasks;
-              }));
-      List.iter
-        (fun (t : task) ->
-          Effect.perform
-            (Effects.Log (Printf.sprintf "  %d. %s" t.index t.description)))
-        initial_plan.tasks;
-
-      (* Step 3: executor memory (loads from disk if memory_dir set). *)
-      let exec_mem =
-        Memory.create ~model ?dir:memory_dir ~name:executor_memory_name ()
-      in
-      if Memory.length exec_mem > 0 then
-        Effect.perform
-          (Effects.Log
-             (Printf.sprintf
-                "[memory] loaded %d prior executor message(s)"
-                (Memory.length exec_mem)));
-
-      (* Initial drive args: either resumed from disk or fresh. *)
-      let init_pending, init_acc, init_recoveries, init_prior =
-        match resume_state with
-        | Some s ->
-            ( s.pending,
-              s.completed_rev,
-              s.recoveries,
-              s.prior_failures )
-        | None -> (initial_plan.tasks, [], 0, [])
-      in
-
-      let persist_state ~pending ~acc ~recoveries ~prior_failures =
-        match memory_dir with
-        | None -> ()
-        | Some dir ->
-            Plan_state.save ~dir
-              {
-                goal;
-                plan = initial_plan;
-                pending;
-                completed_rev = acc;
-                recoveries;
-                prior_failures;
-              }
-      in
-
-      (* Step 4: drive tasks one-by-one with persistent memory +
-         retry/recovery. [prior_failures] carries (description, error)
-         pairs from earlier recovery cycles so the recovery planner can
-         see whether a similar replan has already failed and prefer
-         abandon over yet another similar-shape replan. *)
-      let rec drive ~pending ~acc ~recoveries ~prior_failures =
-        persist_state ~pending ~acc ~recoveries ~prior_failures;
-        match pending with
-        | [] ->
-            let results = List.map snd (List.rev acc) in
-            let any_failed = List.exists Result.is_error results in
-            let summary_plan =
-              { initial_plan with tasks = List.rev_map fst acc }
-            in
-            if any_failed && recoveries >= max_recoveries then
-              if skip_summarizer then
-                Ok
-                  (Printf.sprintf "Plan: %s (with failures)\n\n%s"
-                     initial_plan.title
-                     (format_task_results summary_plan results))
-              else summarize ~plan:summary_plan ~results ()
-            else if skip_summarizer then
-              Ok
-                (Printf.sprintf "Plan: %s\n\n%s" initial_plan.title
-                   (format_task_results summary_plan results))
-            else summarize ~plan:summary_plan ~results ()
-        | task :: rest ->
-            let total = List.length pending + List.length acc in
-            Effect.perform
-              (Effects.Event_log
-                 (Task_started
-                    {
-                      index = task.index;
-                      total;
-                      description = task.description;
-                    }));
-
-            let checkpoint = Memory.checkpoint exec_mem in
-
-            let rec attempt n =
-              let prior = Memory.to_messages exec_mem in
-              match
-                exec_one_task ~tools ~max_iterations:max_iter
-                  ~strategy:executor_strategy
-                  ~system_prompt:executor_system_prompt
-                  ~system_blocks:executor_system_blocks
-                  ~env:exec_env ~prior_messages:prior ~current_task:task
-              with
-              | `Done (answer, messages) ->
-                  Memory.set exec_mem messages;
-                  Memory.persist exec_mem;
-                  Effect.perform
-                    (Effects.Event_log
-                       (Task_completed
-                          { index = task.index; result_preview = answer }));
-                  `Ok answer
-              | `Failed (err, _) ->
-                  Memory.restore exec_mem checkpoint;
-                  Effect.perform
-                    (Effects.Event_log
-                       (Task_failed
-                          { index = task.index; error = err; attempt = n }));
-                  if n < max_task_retries then attempt (n + 1)
-                  else `Exhausted err
-            in
-            match attempt 0 with
-            | `Ok answer ->
-                drive ~pending:rest
-                  ~acc:((task, Ok answer) :: acc)
-                  ~recoveries ~prior_failures
-            | `Exhausted err ->
-                handle_recovery ~task ~err ~rest ~acc ~recoveries
-                  ~prior_failures
-      and handle_recovery ~task ~err ~rest ~acc ~recoveries ~prior_failures =
-        Effect.perform
-          (Effects.Event_log
-             (Recovery_invoked
-                {
-                  failed_index = task.index;
-                  failed_error = err;
-                  cycle = recoveries;
-                }));
-        if recoveries >= max_recoveries then begin
-          Effect.perform
-            (Effects.Event_log
-               (Recovery_decided
-                  {
-                    decision = "BUDGET_EXHAUSTED";
-                    details =
-                      Printf.sprintf "%d/%d cycles used" recoveries
-                        max_recoveries;
-                  }));
-          drive ~pending:rest
-            ~acc:((task, Error err) :: acc)
-            ~recoveries ~prior_failures
-        end
+      let exec_env, planner_prefix = survey_workspace ~working_dir:config.working_dir in
+      let resume_state =
+        if config.restart then None
         else
-          let completed_descs =
-            List.rev_map (fun (t, _) -> t.description) acc
-          in
-          let remaining_descs =
-            List.map (fun (t : task) -> t.description) rest
-          in
-          let decision =
-            Planner.recover ~research_tools:tools
-              ~prior_failures:(List.rev prior_failures)
-              ~cycle_index:recoveries ~max_cycles:max_recoveries ~goal
-              ~completed:completed_descs ~failed_task:task
-              ~failed_error:err ~remaining:remaining_descs ()
-          in
-          (* On replan or abandon, the current failure becomes part of
-             prior_failures for any FUTURE recovery cycle in this run. *)
-          let next_prior_failures =
-            (task.description, err) :: prior_failures
-          in
-          match decision with
-          | Error _ ->
-              drive ~pending:rest
-                ~acc:((task, Error err) :: acc)
-                ~recoveries:(recoveries + 1)
-                ~prior_failures:next_prior_failures
-          | Ok Abandon ->
-              Effect.perform
-                (Effects.Event_log
-                   (Recovery_decided
-                      {
-                        decision = "ABANDON";
-                        details = "surfacing failure to summarizer";
-                      }));
-              drive ~pending:[]
-                ~acc:((task, Error err) :: acc)
-                ~recoveries:(recoveries + 1)
-                ~prior_failures:next_prior_failures
-          | Ok (Replan new_tasks) ->
-              (* REPLAN replaces failed task AND all remaining pending. *)
-              Effect.perform
-                (Effects.Event_log
-                   (Recovery_decided
-                      {
-                        decision = "REPLAN";
-                        details =
-                          Printf.sprintf "%d new task(s) replace failed + remaining"
-                            (List.length new_tasks);
-                      }));
-              let renumbered =
-                List.mapi
-                  (fun i (t : task) ->
-                    { t with index = List.length acc + 1 + i })
-                  new_tasks
-              in
-              drive ~pending:renumbered ~acc
-                ~recoveries:(recoveries + 1)
-                ~prior_failures:next_prior_failures
-          | Ok (Split new_tasks) ->
-              (* SPLIT replaces ONLY the failed task with smaller
-                 sub-tasks; remaining stays (renumbered). *)
-              Effect.perform
-                (Effects.Event_log
-                   (Recovery_decided
-                      {
-                        decision = "SPLIT";
-                        details =
-                          Printf.sprintf "failed task -> %d sub-task(s); %d remaining stay"
-                            (List.length new_tasks) (List.length rest);
-                      }));
-              let split_count = List.length new_tasks in
-              let split_renumbered =
-                List.mapi
-                  (fun i (t : task) ->
-                    { t with index = List.length acc + 1 + i })
-                  new_tasks
-              in
-              let rest_renumbered =
-                List.mapi
-                  (fun i (t : task) ->
-                    {
-                      t with
-                      index = List.length acc + 1 + split_count + i;
-                    })
-                  rest
-              in
-              drive ~pending:(split_renumbered @ rest_renumbered) ~acc
-                ~recoveries:(recoveries + 1)
-                ~prior_failures:next_prior_failures
-          | Ok Skip ->
-              (* SKIP drops the failed task and continues unchanged. *)
-              Effect.perform
-                (Effects.Event_log
-                   (Recovery_decided
-                      {
-                        decision = "SKIP";
-                        details =
-                          Printf.sprintf "%d remaining task(s) continue"
-                            (List.length rest);
-                      }));
-              drive ~pending:rest
-                ~acc:((task, Error err) :: acc)
-                ~recoveries:(recoveries + 1)
-                ~prior_failures:next_prior_failures
+          match config.memory_dir with
+          | Some dir -> Plan_state.try_load ~dir ~goal
+          | None -> None
       in
-      let result =
-        drive ~pending:init_pending ~acc:init_acc
-          ~recoveries:init_recoveries ~prior_failures:init_prior
+      let goal_for_planner =
+        if planner_prefix = "" then goal
+        else planner_prefix ^ "\n\n--- USER GOAL ---\n" ^ goal
       in
-      (* Clear plan_state on a successful run so the next invocation
-         starts fresh. Failed summarizes leave the file so the user
-         can retry without re-running every task. *)
-      (match (result, memory_dir) with
+      let workflow : string Workflow.t =
+        let open Workflow in
+        let* initial_plan =
+          plan_or_resume_flow ~config ~goal ~goal_for_planner ~tools
+            ~resume_state
+        in
+        (* Memory is now an in-memory cache; persistence rides on
+           [plan_state.json] via [persist_state]. Initial messages
+           come from [resume_state.executor_messages] when resuming
+           (already goal-checked); empty otherwise. *)
+        let exec_mem =
+          Memory.create ~model:config.model ~name:executor_memory_name ()
+        in
+        let* () =
+          action (fun () ->
+              match resume_state with
+              | Some s when not config.restart ->
+                  Memory.set exec_mem s.executor_messages;
+                  if List.length s.executor_messages > 0 then
+                    Effect.perform
+                      (Effects.Log
+                         (Printf.sprintf
+                            "[memory] resumed %d prior executor message(s)"
+                            (List.length s.executor_messages)))
+              | _ -> ())
+        in
+        let env =
+          {
+            config;
+            goal;
+            tools;
+            initial_plan;
+            exec_mem;
+            exec_env;
+            executor_strategy = config.executor_strategy ();
+          }
+        in
+        let init_state =
+          match resume_state with
+          | Some s ->
+              {
+                pending = s.pending;
+                acc = s.completed_rev;
+                recoveries = s.recoveries;
+                prior_failures = s.prior_failures;
+              }
+          | None ->
+              {
+                pending = initial_plan.tasks;
+                acc = [];
+                recoveries = 0;
+                prior_failures = [];
+              }
+        in
+        drive_flow env init_state
+      in
+      let result = Workflow.run workflow in
+      (match (result, config.memory_dir) with
       | Ok _, Some dir -> Plan_state.clear ~dir
       | _ -> ());
       result)

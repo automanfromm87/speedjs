@@ -1,14 +1,9 @@
-(** Persistent control-state for [Plan_act.run]: tracks where we are
-    in the task list so a crashed / interrupted run can resume from
-    [memory_dir/plan_state.json] instead of restarting the planner.
-
-    Pairs with [Memory] (which stores the executor's accumulating
-    message list at [memory_dir/executor.json]). Together they form
-    the durable run state — control plane (this module) plus data
-    plane (executor history).
-
-    Persistence routes through [Effects.File_*] so virtual-FS tests
-    cover it transparently. *)
+(** Unified durable state for [Plan_act.run]: control plane (plan /
+    pending / completed / recovery) AND data plane (executor message
+    history) in a single file written atomically through
+    [Effects.File_*]. Replaces the older two-file design (plan_state +
+    executor) which had a split-brain crash window between the two
+    writes. *)
 
 open Types
 
@@ -27,6 +22,11 @@ type t = {
   recoveries : int;
   prior_failures : (string * string) list;
       (** [(task_description, error)] from earlier recovery cycles. *)
+  executor_messages : message list;
+      (** Executor's accumulating conversation history across tasks
+          (helix-style cross-task memory). Persisted in this same
+          file so that a crash between control and data plane writes
+          can't leave them inconsistent. *)
 }
 
 (* ===== JSON ===== *)
@@ -60,7 +60,7 @@ let result_of_json = function
 let to_json (s : t) : Yojson.Safe.t =
   `Assoc
     [
-      ("version", `Int 1);
+      ("version", `Int 2);
       ("goal", `String s.goal);
       ( "plan",
         `Assoc
@@ -85,6 +85,8 @@ let to_json (s : t) : Yojson.Safe.t =
                `Assoc
                  [ ("description", `String d); ("error", `String e) ])
              s.prior_failures) );
+      ( "executor_messages",
+        `List (List.map Codec.message_to_json s.executor_messages) );
     ]
 
 let plan_of_json = function
@@ -156,7 +158,21 @@ let of_json (j : Yojson.Safe.t) : t =
               items
         | _ -> []
       in
-      { goal; plan; pending; completed_rev; recoveries; prior_failures }
+      let executor_messages =
+        match List.assoc_opt "executor_messages" fs with
+        | Some (`List items) ->
+            (try List.map Codec.message_of_json items with _ -> [])
+        | _ -> []
+      in
+      {
+        goal;
+        plan;
+        pending;
+        completed_rev;
+        recoveries;
+        prior_failures;
+        executor_messages;
+      }
   | _ -> failwith "plan_state root must be JSON object"
 
 (* ===== Persistence (via File effects) ===== *)
@@ -169,21 +185,41 @@ let save ~dir (s : t) : unit =
 
 (** Load + verify the persisted goal matches. Returns [None] if the
     file is missing, malformed, or stores a different goal — caller
-    should fall through to fresh planning. *)
+    should fall through to fresh planning. Parse failures and
+    goal-mismatch are logged via [Effects.Log] so silent fallback to
+    "fresh planner run" is visible. *)
 let try_load ~dir ~goal : t option =
   let path = path_of ~dir in
   match Effect.perform (Effects.File_stat path) with
   | `Missing | `Dir -> None
   | `File -> (
       match Effect.perform (Effects.File_read path) with
-      | Error _ -> None
+      | Error msg ->
+          Effect.perform
+            (Effects.Log
+               (Printf.sprintf
+                  "[plan_state] %s: read failed (%s) — replanning" path msg));
+          None
       | Ok body ->
           if String.trim body = "" then None
-          else
+          else (
             try
               let s = of_json (Yojson.Safe.from_string body) in
-              if s.goal = goal then Some s else None
-            with _ -> None)
+              if s.goal = goal then Some s
+              else (
+                Effect.perform
+                  (Effects.Log
+                     (Printf.sprintf
+                        "[plan_state] %s: goal mismatch (saved=%S, current=%S) — replanning"
+                        path s.goal goal));
+                None)
+            with e ->
+              Effect.perform
+                (Effects.Log
+                   (Printf.sprintf
+                      "[plan_state] %s: parse failed (%s) — replanning"
+                      path (Printexc.to_string e)));
+              None))
 
 (** Mark the run as complete by writing an empty body. The next [try_load]
     will skip this path. (No File_delete effect; empty body is the

@@ -199,14 +199,15 @@ let test_tool_handler_install_dispatches_via_chain () =
   in
   let chain = Tool_handler.with_logging ~on_log:(fun _ -> ()) Tool_handler.direct in
   let result =
-    Tool_handler.install ~tools:[ tool ] chain (fun () ->
+    Tool_handler.install chain (fun () ->
         Effect.perform
           (Effects.Tool_calls
-             [
-               ( Id.Tool_use_id.of_string "u1",
-                 "echo",
-                 `Assoc [ ("v", `Int 42) ] );
-             ]))
+             ( [ tool ],
+               [
+                 ( Id.Tool_use_id.of_string "u1",
+                   "echo",
+                   `Assoc [ ("v", `Int 42) ] );
+               ] )))
   in
   assert (List.length result = 1);
   let id, r = List.hd result in

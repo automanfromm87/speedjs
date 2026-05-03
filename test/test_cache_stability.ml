@@ -94,6 +94,45 @@ let test_codec_message_deterministic () =
   assert (s1 = s2 && s2 = s3);
   print_endline "✓ Codec.message_to_json deterministic across calls"
 
+(* Regression: Codec.content_block_of_json must round-trip
+   tool_result. Memory.try_load_messages used to silently drop
+   executor histories that contained tool_result blocks because
+   of_json hit failwith, the surrounding [try _ -> []] swallowed it,
+   and the user lost their session memory on every restart. *)
+let test_codec_tool_result_round_trip () =
+  let block =
+    Tool_result
+      {
+        tool_use_id = Id.Tool_use_id.of_string "tu_99";
+        content = "42";
+        is_error = false;
+      }
+  in
+  let json = Codec.content_block_to_json block in
+  let back = Codec.content_block_of_json json in
+  (match back with
+  | Tool_result { tool_use_id; content; is_error } ->
+      assert (Id.Tool_use_id.to_string tool_use_id = "tu_99");
+      assert (content = "42");
+      assert (is_error = false)
+  | _ -> failwith "expected Tool_result block back from round-trip");
+  let block_err =
+    Tool_result
+      {
+        tool_use_id = Id.Tool_use_id.of_string "tu_err";
+        content = "boom";
+        is_error = true;
+      }
+  in
+  (match
+     Codec.content_block_of_json (Codec.content_block_to_json block_err)
+   with
+  | Tool_result { is_error = true; _ } -> ()
+  | _ -> failwith "is_error didn't survive round-trip");
+  print_endline
+    "✓ Codec round-trips Tool_result (regression: Memory used to drop \
+     executor history with tool_results)"
+
 let test_codec_full_message_list_deterministic () =
   let msgs =
     [
@@ -142,9 +181,9 @@ let test_sliding_window_at_freezes_cut () =
   let h25 = alternating_history ~turns:25 in
   let h26 = h25 @ [ mk_user 99 ] in
   let h27 = h26 @ [ mk_assistant 99 ] in
-  let kept_25 = strategy h25 in
-  let kept_26 = strategy h26 in
-  let kept_27 = strategy h27 in
+  let kept_25 = Context.Strategy.apply strategy h25 in
+  let kept_26 = Context.Strategy.apply strategy h26 in
+  let kept_27 = Context.Strategy.apply strategy h27 in
   (* All three should drop the SAME prefix (the cut anchor froze on
      call 1). The kept suffix grows by exactly 1 each subsequent
      call, so kept_25 should be a prefix of kept_26, which should be
@@ -176,8 +215,8 @@ let test_two_independent_runs_use_independent_anchors () =
     Context.Strategy.sliding_window_at ~trigger_at:20 ~keep_recent:10
   in
   let h25 = alternating_history ~turns:25 in
-  let kept_a = strategy_a h25 in
-  let kept_b = strategy_b h25 in
+  let kept_a = Context.Strategy.apply strategy_a h25 in
+  let kept_b = Context.Strategy.apply strategy_b h25 in
   (* Both should produce identical output for the same input *)
   assert (kept_a = kept_b);
   print_endline
@@ -189,6 +228,7 @@ let run () =
   test_push_assistant_appends_one ();
   test_push_does_not_perturb_prior ();
   test_codec_message_deterministic ();
+  test_codec_tool_result_round_trip ();
   test_codec_full_message_list_deterministic ();
   test_sliding_window_at_freezes_cut ();
   test_two_independent_runs_use_independent_anchors ()

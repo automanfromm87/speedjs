@@ -1,9 +1,8 @@
-(** Tests for [Agent_algebra]: combinator semantics + interpreter. *)
+(** Tests for [Workflow]: leaf / bind / retry / recover / foreach. *)
 
 open Speedjs
 open Types
 
-(* Helper: build a canned "End_turn" LLM response. *)
 let say text =
   {
     content = [ Text text ];
@@ -11,128 +10,113 @@ let say text =
     usage = usage_of_basic ~input_tokens:5 ~output_tokens:5;
   }
 
-let unwrap = function
-  | Ok s -> s
-  | Error e -> failwith ("expected Ok, got: " ^ agent_error_pp e)
+let chat_spec ?max_iters () =
+  Specs.chat ?max_iters ~tools:[] ()
 
-(* No regex dep — keep tests self-contained. *)
-let contains haystack needle =
-  let hl = String.length haystack in
-  let nl = String.length needle in
-  let rec scan i =
-    if i + nl > hl then false
-    else if String.sub haystack i nl = needle then true
-    else scan (i + 1)
-  in
-  scan 0
-
-let test_leaf_runs_one_agent () =
+let test_leaf_done () =
   let result =
-    Handlers.mock ~llm_responses:[ say "hello from leaf" ] (fun () ->
-        Agent_algebra.execute (Agent_algebra.base ()) "go")
+    Handlers.mock ~llm_responses:[ say "hello" ] (fun () ->
+        Workflow.run
+          (Workflow.leaf (chat_spec ()) (Agent.Fresh "go")
+           |> Workflow.expect_done ~name:"chat"))
   in
-  assert (unwrap result = "hello from leaf");
-  print_endline "✓ leaf runs one Agent.run"
+  (match result with
+  | Ok (answer, _) -> assert (answer = "hello")
+  | Error e -> failwith ("expected Ok, got " ^ agent_error_pp e));
+  print_endline "✓ leaf + expect_done returns Ok answer"
 
-let test_pipe_threads_output_to_input () =
-  (* Two leaves; first says "FOO", second sees "FOO" as its input.
-     With mock, the second's response is also canned but the test
-     verifies the input the SECOND agent received. We can't
-     introspect the mock's recorded inputs directly, so instead check
-     that pipe runs both responses sequentially (both consumed). *)
+let test_bind_threads_value () =
+  (* Two leaves: first answer becomes second leaf's user query. *)
   let result =
     Handlers.mock
       ~llm_responses:[ say "first"; say "second" ]
       (fun () ->
-        let a = Agent_algebra.base () in
-        let b = Agent_algebra.base () in
-        Agent_algebra.execute (Agent_algebra.pipe a b) "start")
+        Workflow.run
+          (let open Workflow in
+           let* (answer1, _) =
+             leaf (chat_spec ()) (Agent.Fresh "start")
+             |> expect_done ~name:"a"
+           in
+           leaf (chat_spec ()) (Agent.Fresh answer1)
+           |> expect_done ~name:"b"))
   in
-  assert (unwrap result = "second");
-  print_endline "✓ pipe: second leaf's output is final"
+  (match result with
+  | Ok (answer, _) -> assert (answer = "second")
+  | Error e -> failwith ("expected Ok, got " ^ agent_error_pp e));
+  print_endline "✓ let* threads first leaf's value into second"
 
-let test_with_retry_recovers () =
-  (* First response causes the agent to error (mock will run out of
-     responses on retry). To simulate Error -> Ok, we need a way to
-     produce an agent_error from the agent. Easiest: 0 responses on
-     attempt 1 → mock raises [failwith] which propagates as exception,
-     not agent_error. So this test instead validates the structural
-     case: two attempts both succeed, retry doesn't kick in. *)
+let test_with_retry_first_attempt_success () =
   let result =
-    Handlers.mock ~llm_responses:[ say "first attempt ok" ] (fun () ->
-        Agent_algebra.execute
-          (Agent_algebra.with_retry ~max_attempts:3
-             (Agent_algebra.base ()))
-          "go")
+    Handlers.mock ~llm_responses:[ say "first ok" ] (fun () ->
+        Workflow.run
+          (Workflow.leaf (chat_spec ()) (Agent.Fresh "go")
+           |> Workflow.expect_done ~name:"chat"
+           |> Workflow.with_retry ~max_attempts:3))
   in
-  assert (unwrap result = "first attempt ok");
-  print_endline "✓ with_retry: success on first attempt skips retry"
+  (match result with
+  | Ok (answer, _) -> assert (answer = "first ok")
+  | Error e -> failwith (agent_error_pp e));
+  print_endline "✓ with_retry succeeds on first attempt without retrying"
 
-let test_replicate_runs_n_times_sequentially () =
+let test_recover_substitutes_on_error () =
+  (* First leaf: empty mock → fails. recover catches and returns a
+     constant value via Workflow.pure. *)
+  let result =
+    Handlers.mock ~llm_responses:[ say "fallback" ] (fun () ->
+        Workflow.run
+          (let open Workflow in
+           recover
+             (* Failing flow: return Failed via direct construction *)
+             (of_result
+                (Error (Plan_invalid "synthetic failure")))
+             (fun _err ->
+               leaf (chat_spec ()) (Agent.Fresh "go")
+               |> expect_done ~name:"recovery")))
+  in
+  (match result with
+  | Ok (answer, _) -> assert (answer = "fallback")
+  | Error e -> failwith (agent_error_pp e));
+  print_endline "✓ recover substitutes a replacement flow on error"
+
+let test_foreach_collects_results () =
   let result =
     Handlers.mock
-      ~llm_responses:[ say "a"; say "b"; say "c" ]
+      ~llm_responses:[ say "A"; say "B"; say "C" ]
       (fun () ->
-        Agent_algebra.execute
-          (Agent_algebra.replicate 3 (Agent_algebra.base ()))
-          "go")
+        Workflow.run
+          (Workflow.foreach [ "x"; "y"; "z" ] (fun input ->
+               Workflow.leaf (chat_spec ()) (Agent.Fresh input)
+               |> Workflow.expect_done ~name:"each")))
   in
-  let s = unwrap result in
-  assert (contains s "=== run:0 ===" && contains s "=== run:1 ===" && contains s "=== run:2 ===" && contains s "a" && contains s "b" && contains s "c");
-  print_endline "✓ replicate(3): all three runs concatenated"
+  (match result with
+  | Ok results ->
+      let answers = List.map fst results in
+      assert (answers = [ "A"; "B"; "C" ])
+  | Error e -> failwith (agent_error_pp e));
+  print_endline "✓ foreach runs body on each item, collects in order"
 
-let test_with_max_iters_overrides_leaf () =
-  (* Just verify the override doesn't blow up the build; the actual
-     iter limit is enforced by Agent.run_loop and would need a more
-     elaborate mock to observe. *)
-  let a =
-    Agent_algebra.with_max_iters 7 (Agent_algebra.base ~max_iters:1 ())
-  in
-  let s = Agent_algebra.show a in
-  assert (contains s "with_max_iters(7)");
-  assert (contains s "max_iters=1");  (* leaf retains its original until execute rewrites *)
-  print_endline "✓ with_max_iters wraps the AST node"
-
-let test_with_skill_injects_block () =
-  let skill : Skill.t =
-    {
-      name = "test_skill";
-      description = "does test things";
-      body = "TEST_SKILL_BODY_MARKER";
-      source_path = "/dev/null";
-    }
-  in
+let test_foreach_short_circuits_on_error () =
+  (* Inject an error flow at the second iteration; verify foreach
+     stops there and returns Error. *)
   let result =
-    Agent_algebra.with_skills [ skill ] (fun () ->
-        Handlers.mock ~llm_responses:[ say "skill ack" ] (fun () ->
-            Agent_algebra.execute
-              (Agent_algebra.with_skill "test_skill"
-                 (Agent_algebra.base ()))
-              "go"))
+    Workflow.run
+      (Workflow.foreach [ 1; 2; 3 ] (fun n ->
+           if n = 2 then
+             Workflow.of_result (Error (Plan_invalid "stop at 2"))
+           else Workflow.pure n))
   in
-  assert (unwrap result = "skill ack");
-  print_endline "✓ with_skill resolves via DLS-provided skill list"
-
-let test_show_renders_tree () =
-  let a =
-    Agent_algebra.pipe
-      (Agent_algebra.with_retry ~max_attempts:2
-         (Agent_algebra.with_skill "backend" (Agent_algebra.base ())))
-      (Agent_algebra.replicate 3 (Agent_algebra.base ()))
-  in
-  let s = Agent_algebra.show a in
-  assert (contains s "pipe:");
-  assert (contains s "with_retry(max=2)");
-  assert (contains s "with_skill(\"backend\")");
-  assert (contains s "replicate(n=3)");
-  print_endline "✓ show renders pipe / retry / skill / replicate"
+  (match result with
+  | Ok _ -> failwith "expected error from item 2"
+  | Error (Plan_invalid msg) -> assert (msg = "stop at 2")
+  | Error e ->
+      failwith ("expected Plan_invalid \"stop at 2\", got " ^ agent_error_pp e));
+  print_endline "✓ foreach short-circuits on first error"
 
 let run () =
-  print_endline "\n=== Agent_algebra ===";
-  test_leaf_runs_one_agent ();
-  test_pipe_threads_output_to_input ();
-  test_with_retry_recovers ();
-  test_replicate_runs_n_times_sequentially ();
-  test_with_max_iters_overrides_leaf ();
-  test_with_skill_injects_block ();
-  test_show_renders_tree ()
+  print_endline "\n=== Workflow ===";
+  test_leaf_done ();
+  test_bind_threads_value ();
+  test_with_retry_first_attempt_success ();
+  test_recover_substitutes_on_error ();
+  test_foreach_collects_results ();
+  test_foreach_short_circuits_on_error ()

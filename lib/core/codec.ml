@@ -75,6 +75,23 @@ let content_block_of_json = function
             | None -> `Assoc []
           in
           Tool_use { id; name; input }
+      | Some (`String "tool_result") ->
+          let tool_use_id =
+            match List.assoc_opt "tool_use_id" fields with
+            | Some (`String s) -> Id.Tool_use_id.of_string s
+            | _ -> failwith "tool_result missing tool_use_id"
+          in
+          let content =
+            match List.assoc_opt "content" fields with
+            | Some (`String s) -> s
+            | _ -> ""
+          in
+          let is_error =
+            match List.assoc_opt "is_error" fields with
+            | Some (`Bool b) -> b
+            | _ -> false
+          in
+          Tool_result { tool_use_id; content; is_error }
       | _ ->
           failwith
             (Printf.sprintf "unknown content block: %s"
@@ -92,6 +109,24 @@ let message_to_json (m : message) =
       ("role", `String (role_to_string m.role));
       ("content", `List (List.map content_block_to_json m.content));
     ]
+
+let message_of_json : Yojson.Safe.t -> message = function
+  | `Assoc fields ->
+      let role =
+        match List.assoc_opt "role" fields with
+        | Some (`String "assistant") -> Assistant
+        | _ -> User
+      in
+      let content =
+        match List.assoc_opt "content" fields with
+        | Some (`List items) -> List.map content_block_of_json items
+        | _ -> []
+      in
+      { role; content }
+  | j ->
+      failwith
+        (Printf.sprintf "message must be JSON object, got: %s"
+           (Yojson.Safe.to_string j))
 
 (* ===== usage ===== *)
 

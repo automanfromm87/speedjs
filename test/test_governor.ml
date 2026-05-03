@@ -219,8 +219,9 @@ let test_governor_aborts_on_cost_via_full_chain () =
              Log_handler.install Log_handler.null (fun () ->
                  Handlers.silent (fun () ->
                      ignore
-                       (Agent.run ~max_iterations:10
-                          ~user_query:"loop forever" ~tools:[] ())))))
+                       (Agent.execute
+                          ~spec:(Specs.chat ~max_iters:10 ~tools:[] ())
+                          ~input:(Agent.Fresh "loop forever"))))))
    with Governor.Governor_aborted { limit; _ } ->
      assert (limit = "max_cost");
      aborted := true);
@@ -281,13 +282,13 @@ let test_governor_aborts_on_death_loop_via_full_chain () =
          Llm_handler.install llm_chain (fun () ->
              File_handler.install File_handler.direct (fun () ->
                  Time_handler.install Time_handler.direct (fun () ->
-                     Tool_handler.install ~tools:Tools.all
-                       Tool_handler.direct (fun () ->
+                     Tool_handler.install Tool_handler.direct (fun () ->
                          Log_handler.install Log_handler.null (fun () ->
                              ignore
-                               (Agent.run ~max_iterations:50
-                                  ~user_query:"loop"
-                                  ~tools:Tools.all ())))))))
+                               (Agent.execute
+                                  ~spec:(Specs.chat ~max_iters:50
+                                           ~tools:Tools.all ())
+                                  ~input:(Agent.Fresh "loop"))))))))
    with Governor.Governor_aborted { limit; _ } ->
      assert (limit = "max_repeated_tool_calls");
      aborted := true);

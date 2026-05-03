@@ -43,6 +43,11 @@ val is_empty : t -> bool
 val is_dangling : t -> bool
 val pending_tool_use_ids : t -> Id.Tool_use_id.t list
 
+(** Names of the tool_uses currently dangling on the trailing Assistant
+    turn. Returns [[]] when [is_dangling] is false. Use to verify a
+    dangling matches the terminal tool of the spec about to resume. *)
+val dangling_tool_use_names : t -> string list
+
 (* ===== Append (raise [Invariant_violated] on misuse) ===== *)
 
 (** Append an Assistant turn. Valid only when the conversation is

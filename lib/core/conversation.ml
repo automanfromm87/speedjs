@@ -72,6 +72,20 @@ let pending_tool_use_ids t =
 let is_dangling t =
   match t.state with S_has_dangling _ -> true | _ -> false
 
+(** Names of the tool_uses that are currently dangling on the trailing
+    Assistant turn. Used by callers (e.g. [Agent.execute]'s [Continue]
+    branch) to decide whether the dangling matches the expected
+    terminal-tool of the next spec. Returns [[]] when not dangling. *)
+let dangling_tool_use_names t =
+  match t.state, t.messages_rev with
+  | S_has_dangling _, last :: _ ->
+      List.filter_map
+        (function
+          | Tool_use { name; _ } -> Some name
+          | _ -> None)
+        last.content
+  | _ -> []
+
 (* ===== Block validation helpers ===== *)
 
 let assistant_blocks_ok blocks =

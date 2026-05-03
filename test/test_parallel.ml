@@ -18,9 +18,13 @@ let test_two_parallel_subagents_isolated () =
   let child resp task : unit -> string =
    fun () ->
     Handlers.mock ~llm_responses:[ resp ] (fun () ->
-        match Agent.run ~user_query:task ~tools:[] () with
-        | Ok s -> s
-        | Error e -> "ERROR: " ^ agent_error_pp e)
+        match
+          Agent.execute ~spec:(Specs.chat ~tools:[] ())
+            ~input:(Agent.Fresh task)
+        with
+        | Agent.Done { answer; _ } -> answer
+        | Agent.Failed { reason; _ } -> "ERROR: " ^ agent_error_pp reason
+        | _ -> "ERROR: unexpected output")
   in
   let answers =
     Parallel_subagent.run [ child resp1 "q1"; child resp2 "q2" ]
@@ -77,9 +81,13 @@ let test_failure_in_one_doesnt_affect_other () =
   let child_ok : unit -> string =
    fun () ->
     Handlers.mock ~llm_responses:[ resp_ok ] (fun () ->
-        match Agent.run ~user_query:"q" ~tools:[] () with
-        | Ok s -> s
-        | Error e -> "ERROR: " ^ agent_error_pp e)
+        match
+          Agent.execute ~spec:(Specs.chat ~tools:[] ())
+            ~input:(Agent.Fresh "q")
+        with
+        | Agent.Done { answer; _ } -> answer
+        | Agent.Failed { reason; _ } -> "ERROR: " ^ agent_error_pp reason
+        | _ -> "ERROR: unexpected output")
   in
   let child_fail : unit -> string =
    fun () -> failwith "deliberate child failure"

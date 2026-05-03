@@ -62,18 +62,32 @@ let parse_messages_from_json (j : Yojson.Safe.t) : message list =
 (* ===== Construction ===== *)
 
 (** Try to load prior messages from disk via [File_*] effects. Errors
-    (missing file, parse failure) are swallowed — Memory is a best-effort
-    cache, not a load-bearing data source. *)
+    are surfaced via [Effects.Log] but otherwise swallowed — Memory is
+    a best-effort cache, not a load-bearing data source. The log line
+    makes silent corruption visible (the user sees "executor.json
+    couldn't be parsed, starting fresh" instead of an inexplicable
+    blank slate). *)
 let try_load_messages ~dir ~name : message list =
   let path = path_of ~dir ~name in
   match Effect.perform (Effects.File_stat path) with
   | `Missing | `Dir -> []
   | `File -> (
       match Effect.perform (Effects.File_read path) with
-      | Error _ -> []
+      | Error msg ->
+          Effect.perform
+            (Effects.Log
+               (Printf.sprintf
+                  "[memory] %s: read failed (%s) — starting fresh" path msg));
+          []
       | Ok body -> (
           try parse_messages_from_json (Yojson.Safe.from_string body)
-          with _ -> []))
+          with e ->
+            Effect.perform
+              (Effects.Log
+                 (Printf.sprintf
+                    "[memory] %s: parse failed (%s) — starting fresh"
+                    path (Printexc.to_string e)));
+            []))
 
 (** Construct an empty memory handle. If [dir] is given AND a prior file
     exists, loads its messages on creation. *)

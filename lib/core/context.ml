@@ -9,24 +9,7 @@
     decide how they materialize into the wire format — preserving
     cache-friendly identity for the front while applying compaction or
     sliding window to the back. Each agent loop picks its strategy;
-    multi-agent systems can mix strategies.
-
-    Three-stage strategy example:
-    {[
-      System Prompt ──┐
-      <env>...</env>  │── system field
-                      ┘
-      [Compacted History] ──┐
-      Recent History        │── messages field
-      Running               ┘
-      Tools ────────────────── tools field
-    ]}
-
-    The conversation invariants (alternation, tool_use/result pairing)
-    are enforced by [Conversation.t] internally. A [Strategy] may
-    produce a list that violates Conversation invariants (e.g. dropping
-    the first User turn in sliding_window); [Anthropic.validate] catches
-    that at the API boundary. *)
+    multi-agent systems can mix strategies. *)
 
 open Types
 
@@ -35,29 +18,33 @@ type system_block = { name : string; body : string }
 
 type t = {
   system_prompt : string;
-      (** The base system prompt — what the agent / mode hardcodes. *)
   system_blocks : system_block list;
-      (** Extension-contributed prompt fragments (skill index, memory
-          summary, workspace brief, ...). Stored in reverse insertion
-          order; [render_system] reverses before formatting. Kept
-          separate from [system_prompt] so multiple contributors can
-          add blocks without coordinating string concatenation, and
-          so the cache prefix (base + tools) stays stable across
-          extensions. *)
   env : env_block list;
-      (** User-side env blocks (the "<tag>body</tag>" wrapping in the
-          system field). Stored in reverse insertion order. *)
   tools : tool_def list;
   conversation : Conversation.t;
 }
 
 module Strategy = struct
-  (** A [Strategy] adjusts the materialized conversation. It's a plain
-      [message list -> message list] so callers can compose / fold their
-      own. Pre-built strategies cover the common cases. *)
-  type t = message list -> message list
+  type t =
+    | Flat
+    | Sliding_window of { keep_recent : int }
+    | Sliding_window_at of { trigger_at : int; keep_recent : int }
+    | Compacted of {
+        compact_at : int;
+        keep_recent : int;
+        compactor : message list -> string;
+      }
 
-  let flat : t = Fun.id
+  (* ===== Convenience aliases ===== *)
+
+  let flat = Flat
+  let sliding_window ~keep_recent = Sliding_window { keep_recent }
+  let sliding_window_at ~trigger_at ~keep_recent =
+    Sliding_window_at { trigger_at; keep_recent }
+  let compacted ~compact_at ~keep_recent ~compactor =
+    Compacted { compact_at; keep_recent; compactor }
+
+  (* ===== Internals ===== *)
 
   let drop_first_n n msgs =
     let rec skip k = function
@@ -67,10 +54,6 @@ module Strategy = struct
     in
     skip n msgs
 
-  (** Drop leading User turns (which after a cut may carry [Tool_result]
-      blocks pointing at now-dropped [Tool_use]s — Anthropic 400s). The
-      first kept turn must be Assistant so the prepended synthetic User
-      preserves alternation. *)
   let drop_leading_user msgs =
     let rec loop = function
       | { role = User; _ } :: rest -> loop rest
@@ -85,78 +68,76 @@ module Strategy = struct
           context bounded]"
          n_dropped)
 
-  (** Cut [drop] messages off the front, then repair invariants:
-        - first message must be User
-        - User turns can't carry tool_results without matching tool_use
-      Strategy: skip leading User turns post-cut (they may have orphan
-      tool_results), then prepend a synthetic User text turn so the
-      kept stream starts User → Assistant → User → ... *)
   let safe_cut ~drop msgs =
     let after_drop = drop_first_n drop msgs in
     let kept = drop_leading_user after_drop in
     let n_dropped = List.length msgs - List.length kept in
     truncated_marker n_dropped :: kept
 
-  (** Keep only the LAST [keep_recent] messages (approximately —
-      orphan-User turns are dropped and a synthetic prefix is added,
-      so final length may be slightly off). The synthetic prefix
-      preserves Anthropic's "first message = User" invariant and
-      avoids dangling tool_result blocks. *)
-  let sliding_window ~keep_recent : t =
-   fun msgs ->
-    let n = List.length msgs in
-    if n <= keep_recent then msgs
-    else safe_cut ~drop:(n - keep_recent) msgs
+  (** Closed-form anchor for [Sliding_window_at]. Replaces the old
+      stateful [cut_at] ref. The previous behavior re-anchored every
+      time the kept-suffix length crossed [trigger_at]; that
+      progression is an arithmetic series at fixed step
+      δ = trigger + 1 - keep_recent, so we can derive the current
+      anchor from the message-list length [n] alone:
 
-  (** Soft-trigger sliding window with a frozen cut anchor.
-      Stateful: each call to [sliding_window_at] returns a fresh
-      closure with its own [cut_at] ref. Cache stability requires that
-      successive calls drop the SAME prefix, so callers must reuse the
-      SAME closure within a run (and create a NEW one per run).
+        N ≤ trigger          → anchor = 0
+        N > trigger, δ > 0   → anchor = floor((N - keep_recent) / δ) * δ
+        keep_recent ≥ trigger → anchor = 0  (degenerate; never trim)
 
-      Algorithm:
-      - On first call where messages exceed [trigger_at], freeze
-        [cut_at = n - keep_recent] so the kept suffix starts after a
-        stable index.
-      - On subsequent calls, keep applying that [cut_at] until the
-        effective (un-cut) length crosses [trigger_at] again, at which
-        point we re-anchor.
-
-      Result: between trims, the cached prompt prefix (system + tools +
-      first kept turn) stays stable across many LLM calls. *)
-  let sliding_window_at ~trigger_at ~keep_recent : t =
-    let cut_at = ref 0 in
-    fun msgs ->
-      let n = List.length msgs in
-      let effective = n - !cut_at in
-      if effective > trigger_at then cut_at := n - keep_recent;
-      if !cut_at > 0 then safe_cut ~drop:!cut_at msgs else msgs
-
-  (** When the conversation has more than [compact_at] messages, replace
-      the oldest [n - keep_recent] with a single User turn containing
-      the [compactor]'s summary text.
-
-      [compactor] receives the messages-to-be-summarized and returns the
-      summary string. Typical implementations call an LLM via
-      [Effects.Llm_complete] to produce a tight briefing. *)
-  let compacted ~compact_at ~keep_recent ~compactor : t =
-   fun msgs ->
-    let n = List.length msgs in
-    if n <= compact_at then msgs
+      Verified to match the closure-stateful version on monotonically
+      growing message sequences (the only call pattern in practice). *)
+  let sliding_window_at_anchor ~trigger_at ~keep_recent ~n =
+    if n <= trigger_at then 0
     else
-      let rec split k = function
-        | [] -> ([], [])
-        | rest when k <= 0 -> ([], rest)
-        | x :: rest ->
-            let l, r = split (k - 1) rest in
-            (x :: l, r)
-      in
-      let to_summarize, to_keep = split (n - keep_recent) msgs in
-      let summary = compactor to_summarize in
-      user_text_message
-        (Printf.sprintf
-           "<compacted_history>\n%s\n</compacted_history>" summary)
-      :: to_keep
+      let delta = trigger_at + 1 - keep_recent in
+      if delta <= 0 then 0
+      else (n - keep_recent) / delta * delta
+
+  let split_at k xs =
+    let rec loop k acc = function
+      | [] -> (List.rev acc, [])
+      | rest when k <= 0 -> (List.rev acc, rest)
+      | x :: rest -> loop (k - 1) (x :: acc) rest
+    in
+    loop k [] xs
+
+  (* ===== Interpreter ===== *)
+
+  let apply (s : t) (msgs : message list) : message list =
+    match s with
+    | Flat -> msgs
+    | Sliding_window { keep_recent } ->
+        let n = List.length msgs in
+        if n <= keep_recent then msgs
+        else safe_cut ~drop:(n - keep_recent) msgs
+    | Sliding_window_at { trigger_at; keep_recent } ->
+        let n = List.length msgs in
+        let cut_at =
+          sliding_window_at_anchor ~trigger_at ~keep_recent ~n
+        in
+        if cut_at > 0 then safe_cut ~drop:cut_at msgs else msgs
+    | Compacted { compact_at; keep_recent; compactor } ->
+        let n = List.length msgs in
+        if n <= compact_at then msgs
+        else
+          let to_summarize, to_keep = split_at (n - keep_recent) msgs in
+          let summary = compactor to_summarize in
+          user_text_message
+            (Printf.sprintf
+               "<compacted_history>\n%s\n</compacted_history>" summary)
+          :: to_keep
+
+  let label = function
+    | Flat -> "flat"
+    | Sliding_window { keep_recent } ->
+        Printf.sprintf "sliding_window{keep=%d}" keep_recent
+    | Sliding_window_at { trigger_at; keep_recent } ->
+        Printf.sprintf "sliding_window_at{trigger=%d, keep=%d}"
+          trigger_at keep_recent
+    | Compacted { compact_at; keep_recent; _ } ->
+        Printf.sprintf "compacted{at=%d, keep=%d, compactor=<fun>}"
+          compact_at keep_recent
 end
 
 (* ===== Construction ===== *)
@@ -221,9 +202,9 @@ let push_user_text text t =
     {ol
     {- [system_prompt] (the base — most stable, prompt-cache prefix)}
     {- [system_blocks] in registration order (extension-contributed)}
-    {- [env] blocks in registration order (user-side dynamic state)}}
+    {- [env] blocks (ambient context, less stable)}}
 
-    Stable ordering matters for prompt cache: changing earlier parts
+    Stability order matters: any change in earlier components
     invalidates everything after, so put the most-stable content first.
 
     Returns "" when all three are empty so callers can branch. *)
@@ -239,18 +220,16 @@ let render_system t =
       (List.rev t.env)
   in
   let parts =
-    (if t.system_prompt = "" then [] else [ t.system_prompt ])
-    @ block_strs @ env_strs
+    [ t.system_prompt ] @ block_strs @ env_strs
+    |> List.filter (fun s -> s <> "")
   in
   String.concat "\n\n" parts
 
 let to_llm_args ?(strategy = Strategy.flat) ?(tool_choice = Tc_auto) t :
     llm_call_args =
-  let system = render_system t in
-  let messages = strategy (Conversation.to_messages t.conversation) in
-  {
-    system_override = (if system = "" then None else Some system);
-    tools = t.tools;
-    messages;
-    tool_choice;
-  }
+  let messages = Strategy.apply strategy (Conversation.to_messages t.conversation) in
+  let system_override =
+    let s = render_system t in
+    if s = "" then None else Some s
+  in
+  { messages; tools = t.tools; system_override; tool_choice }

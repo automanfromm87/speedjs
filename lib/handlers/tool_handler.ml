@@ -343,8 +343,11 @@ let with_logging ?(on_log = prerr_endline) (inner : t) : t =
 (* ===== Install: convert chain to effect handler ===== *)
 
 (** Apply [chain] to a single use, converting [Error.t] back to a plain
-    string at the boundary (for the legacy effect signature). Returns
-    the [tool_handler_result] tuple expected by [Effects.Tool_calls]. *)
+    string at the boundary. Returns the [tool_handler_result] tuple
+    expected by [Effects.Tool_calls]. The [tools] registry comes from
+    the effect payload — same list the LLM saw — so name lookup is
+    spec-driven, not bound to whatever [Tool_handler.install] was
+    configured with. *)
 let dispatch_one ~chain ~tools
     ((id, name, input) : Id.Tool_use_id.t * string * Yojson.Safe.t)
     : Id.Tool_use_id.t * tool_handler_result =
@@ -384,9 +387,8 @@ let truncate_result name r =
     The recursive [wrap] lets tools that perform their own effects
     (notably [delegate], spawning sub-agents) propagate their effects
     through the SAME handler stack. *)
-let install ~tools (chain : t) f =
+let install (chain : t) f =
   let open Effect.Deep in
-  let find_tool name = List.find_opt (fun (t : tool_def) -> t.name = name) tools in
   let rec wrap : type r. (unit -> r) -> r =
    fun thunk ->
     try_with thunk ()
@@ -394,9 +396,14 @@ let install ~tools (chain : t) f =
         effc =
           (fun (type a) (eff : a Effect.t) ->
             match eff with
-            | Effects.Tool_calls uses ->
+            | Effects.Tool_calls (tools, uses) ->
                 Some
                   (fun (k : (a, _) continuation) ->
+                    let find_tool name =
+                      List.find_opt
+                        (fun (t : tool_def) -> t.name = name)
+                        tools
+                    in
                     List.iter
                       (fun (id, name, input) ->
                         perform_tool_started_tick ~name ~use_id:id ~input)

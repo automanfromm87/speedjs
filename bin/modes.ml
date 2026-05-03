@@ -10,7 +10,7 @@ let session ~(args : Args.t) ~path ~tools
     ?(system_blocks : (string * string) list = [])
     ~run_with_runtime ~quiet ~model () : int =
   let prior =
-    match Speedjs.Session.load ~path with
+    match Speedjs.Session.load ~on_corrupt:Log.line ~path () with
     | Some s ->
         if not quiet then
           Log.f "[session] loaded %d prior messages from %s"
@@ -22,30 +22,32 @@ let session ~(args : Args.t) ~path ~tools
   in
   let session_with_input = Speedjs.Session.append_input prior args.query in
   let agent_thunk () =
-    Speedjs.Agent.run_session ~max_iterations:args.max_iters
-      ~system_blocks
-      ~messages:session_with_input.messages ~tools ()
+    let spec =
+      Speedjs.Specs.chat ~system_blocks ~max_iters:args.max_iters ~tools ()
+    in
+    Speedjs.Agent.execute ~spec
+      ~input:(Speedjs.Agent.Resume session_with_input.messages)
   in
   (* Global limits are enforced by [Governor] (installed in
      [Setup.make_runtime]); no per-call protection wrapping needed here. *)
   let outcome =
-    Speedjs.Protection.catch_protection_errors_outcome (fun () ->
+    Speedjs.Protection.catch_protection_errors_output (fun () ->
         run_with_runtime agent_thunk)
   in
   let updated =
-    Speedjs.Session.update_after_run session_with_input outcome
+    Speedjs.Session.update_after_output session_with_input outcome
   in
   Speedjs.Session.save ~path updated;
   print_endline "";
   match outcome with
-  | Outcome_done { answer; _ } ->
+  | Speedjs.Agent.Done { answer; _ } ->
       print_endline "================ Answer ======================";
       print_endline answer;
       print_endline "================================================";
       Log.f "[session] saved %d messages (completed)"
         (List.length updated.messages);
       0
-  | Outcome_waiting { question; _ } ->
+  | Speedjs.Agent.Waiting { question; _ } ->
       print_endline "================ Waiting on you ==============";
       print_endline question;
       print_endline "================================================";
@@ -54,9 +56,16 @@ let session ~(args : Args.t) ~path ~tools
          --session %s \"<your answer>\" to continue."
         (List.length updated.messages) path;
       0
-  | Outcome_failed { reason; _ } ->
+  | Speedjs.Agent.Failed { reason; _ } ->
       print_endline "================ Agent Error =================";
       print_endline (Speedjs.Types.agent_error_pp reason);
+      print_endline "================================================";
+      1
+  | Speedjs.Agent.Terminal_tool { name; _ } ->
+      print_endline "================ Agent Error =================";
+      Printf.printf
+        "chat spec unexpectedly terminated on tool %S — Free_text \
+         spec should not have a terminal tool\n" name;
       print_endline "================================================";
       1
 
@@ -80,9 +89,15 @@ let oneshot ~(args : Args.t) ~tools
       in
       Speedjs.Plan_act.run ~config ~goal:args.query ~tools ()
     else
-      Speedjs.Agent.run ~max_iterations:args.max_iters
-        ~system_blocks
-        ~user_query:args.query ~tools ()
+      let spec =
+        Speedjs.Specs.chat ~system_blocks ~max_iters:args.max_iters ~tools
+          ()
+      in
+      let out =
+        Speedjs.Agent.execute ~spec
+          ~input:(Speedjs.Agent.Fresh args.query)
+      in
+      Result.map fst (Speedjs.Agent.expect_done ~name:"chat" out)
   in
   (* Global limits are enforced by [Governor] (installed in
      [Setup.make_runtime]); no per-call protection wrapping needed here. *)

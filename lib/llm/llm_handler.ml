@@ -217,7 +217,7 @@ let with_compaction_on_overflow ~keep_recent
           ~compact_at:(List.length args.messages - 1)
           ~keep_recent ~compactor
       in
-      let compacted = strategy args.messages in
+      let compacted = Context.Strategy.apply strategy args.messages in
       inner { args with messages = compacted }
 
 (** Print the request body (pretty JSON) before each call. Wired to

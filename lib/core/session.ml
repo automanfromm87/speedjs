@@ -100,7 +100,12 @@ let save ~path (s : t) : unit =
   output_string oc (Yojson.Safe.pretty_to_string (to_json s));
   close_out oc
 
-let load ~path : t option =
+(** [?on_corrupt msg] fires when the file exists but failed to parse
+    (read error / JSON / [of_json] mismatch). Receives a human-readable
+    diagnostic. Default is silent — but [bin/modes.ml] passes its
+    logger so the user sees "your session file was unreadable, starting
+    fresh" instead of mysteriously losing a multi-turn history. *)
+let load ?(on_corrupt = fun _ -> ()) ~path () : t option =
   if not (Sys.file_exists path) then None
   else
     try
@@ -109,7 +114,11 @@ let load ~path : t option =
       let body = really_input_string ic n in
       close_in ic;
       Some (of_json (Yojson.Safe.from_string body))
-    with _ -> None
+    with e ->
+      on_corrupt
+        (Printf.sprintf "session %s: parse failed (%s)" path
+           (Printexc.to_string e));
+      None
 
 (** Append the user's new input to the session, taking pending state into
     account: if there's a pending ask_user tool_use, the input becomes its
@@ -132,17 +141,27 @@ let append_input (s : t) (input : string) : t =
   }
 
 (** Update session state after running the agent: stash the resulting
-    message history and pending state. *)
-let update_after_run (s : t) (outcome : session_result) : t =
-  match outcome with
-  | Outcome_done { final_messages; _ } ->
-      { s with messages = final_messages; pending_tool_use_id = None }
-  | Outcome_waiting { messages; tool_use_id; _ } ->
-      {
-        s with
-        messages;
-        pending_tool_use_id = Some tool_use_id;
-      }
-  | Outcome_failed { messages; _ } ->
-      (* Keep messages so user can retry from the failure point. *)
+    message history and pending state. Operates on an [Agent.output]
+    directly.
+
+    Empty-message guard: a [Failed] outcome with [messages = []] means
+    the run aborted before producing any conversation state (e.g.
+    [Governor_aborted] or [Llm_api_error] caught by [Protection]
+    before the run got to write a [ctx]). In that case we MUST NOT
+    overwrite a non-empty prior session — that would silently destroy
+    the user's history on a transient failure. Return [s] unchanged. *)
+let update_after_output (s : t) (out : Agent.output) : t =
+  match out with
+  | Agent.Done { messages; _ } ->
+      { s with messages; pending_tool_use_id = None }
+  | Agent.Waiting { messages; tool_use_id; _ } ->
+      { s with messages; pending_tool_use_id = Some tool_use_id }
+  | Agent.Failed { messages = []; _ } -> s
+  | Agent.Failed { messages; _ } ->
+      { s with messages; pending_tool_use_id = None }
+  | Agent.Terminal_tool { messages = []; _ } -> s
+  | Agent.Terminal_tool { messages; _ } ->
+      (* Chat specs use [Free_text] terminal so this branch is
+         unreachable in practice; if a non-chat spec ever lands here
+         we still persist the messages for forensic purposes. *)
       { s with messages; pending_tool_use_id = None }

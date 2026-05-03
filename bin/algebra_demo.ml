@@ -1,15 +1,15 @@
-(** Agent algebra demo. Builds a small composed agent and runs it.
+(** Workflow demo. Builds a small composed agent flow and runs it.
 
     Usage:
       dune exec algebra_demo -- "<your input>"
 
-    The agent built is intentionally simple — a [base] wrapped with
-    [with_retry 2] and [pipe] to a follow-up [base]. The point is to
-    show:
-      1. [show] renders the tree before running ($ value).
-      2. [execute] runs the same value through the standard runtime
-         (cost / trace / sandbox / governor all inherited).
-      3. Combinators are pure — building doesn't burn API credits. *)
+    The flow is intentionally simple — analyze (with retry) → pipe its
+    answer into a summarize leaf. Demonstrates:
+      1. Workflow combinators ([with_retry], [bind] via [let*], [map]).
+      2. Same runtime as [main.ml] (cost / trace / sandbox / governor
+         inherited).
+      3. Building the flow is pure; only [Workflow.run] burns API
+         credits. *)
 
 open Speedjs
 
@@ -26,22 +26,25 @@ let () =
   in
   let cost = Handlers.new_cost_state () in
 
-  (* Build a small composed agent. *)
-  let agent =
-    let summarize = Agent_algebra.base ~tools:[] () in
-    let analyze =
-      Agent_algebra.with_retry ~max_attempts:2
-        (Agent_algebra.base
-           ~tools:[ Tools.bash; Tools.calculator ]
-           ~max_iters:5 ())
+  (* analyze leaf, retried up to 2 times on failure; its answer becomes
+     the input to summarize. *)
+  let flow : (string * Speedjs.Types.message list) Workflow.t =
+    let open Workflow in
+    let analyze_spec =
+      Specs.chat ~tools:[ Tools.bash; Tools.calculator ] ~max_iters:5 ()
     in
-    Agent_algebra.pipe analyze summarize
+    let summarize_spec = Specs.chat ~tools:[] () in
+    let* (answer, _) =
+      leaf analyze_spec (Agent.Fresh input)
+      |> expect_done ~name:"analyze"
+      |> with_retry ~max_attempts:2
+    in
+    leaf summarize_spec (Agent.Fresh answer)
+    |> expect_done ~name:"summarize"
   in
 
-  Printf.printf "──── agent tree ────\n%s\n──── input ────\n%s\n\n%!"
-    (Agent_algebra.show agent) input;
+  Printf.printf "──── input ────\n%s\n\n%!" input;
 
-  (* Standard runtime — same wiring main.ml uses, minus skills/MCP. *)
   let runtime_config : Runtime.config =
     {
       model;
@@ -56,20 +59,19 @@ let () =
       sandbox_root = None;
       tracer = Trace.make_noop ();
       on_event = (fun _ -> ());
+      chaos = Chaos.default;
     }
   in
 
   let result =
-    Runtime.install ~tools:[ Tools.bash; Tools.calculator ]
-      ~config:runtime_config (fun () ->
-        Agent_algebra.execute agent input)
+    Runtime.install ~config:runtime_config (fun () -> Workflow.run flow)
   in
 
   print_endline "\n──── result ────";
   (match result with
-  | Ok s -> print_endline s
-  | Error e ->
-      Printf.eprintf "ERROR: %s\n" (Speedjs.Types.agent_error_pp e);
+  | Ok (answer, _) -> print_endline answer
+  | Error reason ->
+      Printf.eprintf "ERROR: %s\n" (Speedjs.Types.agent_error_pp reason);
       exit 1);
   Printf.printf "\n──── cost ────\n$%.4f (in=%d out=%d cache_r=%d)\n"
     (Handlers.cost_usd cost) cost.input_tokens cost.output_tokens
