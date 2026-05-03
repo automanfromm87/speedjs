@@ -257,8 +257,19 @@ let summarize_flow ~(model : string option) ~plan ~results :
             model;
           }
         in
-        let response = Effect.perform (Effects.Llm_complete args) in
-        Ok (Step.extract_final_text response.content))
+        (* Catch Llm_api_error and convert to Result.Error so the
+           outer with_retry / recover can see it. Without this catch,
+           a chaos-injected (or real upstream) LLM error here flies
+           past every workflow combinator straight to the protection
+           layer and kills the whole run AFTER all tasks have
+           succeeded — losing the whole plan's output for one
+           summarizer hiccup. Mirrors the same fix in [Agent.execute]
+           for ReAct-loop LLM calls. *)
+        try
+          let response = Effect.perform (Effects.Llm_complete args) in
+          Ok (Step.extract_final_text response.content)
+        with Llm_error.Llm_api_error e ->
+          Error (Llm_call_failed (Llm_error.pp e)))
   in
   recover (with_retry ~max_attempts:2 llm_call) (fun err ->
       let* () =
