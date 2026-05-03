@@ -77,6 +77,16 @@ type t = {
   chaos_tool : float;
       (** [0.0–1.0] probability of injecting a tool failure per
           dispatch. *)
+  planner_model : string option;
+      (** Override model for [Planner.plan]. None = inherit
+          [SPEEDJS_MODEL] / default. *)
+  executor_model : string option;
+      (** Override model for per-task ReAct loop (~93% of tokens).
+          Cheaper model = lower cost, higher failure-rate risk. *)
+  recovery_model : string option;
+      (** Override model for [Planner.recover]. *)
+  summarizer_model : string option;
+      (** Override model for the final synthesizer call. *)
 }
 
 let default_walltime = 1800.0
@@ -105,6 +115,14 @@ let usage () =
     "    (probabilistic failure injection — exercises retry / recovery";
   prerr_endline
     "     paths; 0.0 = off. Same seed reproduces the same failure sequence.)";
+  prerr_endline
+    "  --planner-model NAME  --executor-model NAME";
+  prerr_endline
+    "  --recovery-model NAME  --summarizer-model NAME";
+  prerr_endline
+    "    (per-role model override; falls back to SPEEDJS_MODEL.";
+  prerr_endline
+    "     Use to mix Opus planner + Sonnet executor on one stack.)";
   prerr_endline
     "  --log-file PATH  --session PATH  --mcp \"cmd args\" (repeatable)";
   prerr_endline "  --debug-request";
@@ -151,6 +169,10 @@ let parse argv : t =
   let chaos_seed = ref 42 in
   let chaos_llm = ref 0.0 in
   let chaos_tool = ref 0.0 in
+  let planner_model = ref None in
+  let executor_model = ref None in
+  let recovery_model = ref None in
+  let summarizer_model = ref None in
   let n = Array.length argv in
   let i = ref 1 in
   while !i < n do
@@ -189,6 +211,11 @@ let parse argv : t =
     | "--chaos-seed" -> chaos_seed := int_of_string (arg "--chaos-seed")
     | "--chaos-llm" -> chaos_llm := float_of_string (arg "--chaos-llm")
     | "--chaos-tool" -> chaos_tool := float_of_string (arg "--chaos-tool")
+    | "--planner-model" -> planner_model := Some (arg "--planner-model")
+    | "--executor-model" -> executor_model := Some (arg "--executor-model")
+    | "--recovery-model" -> recovery_model := Some (arg "--recovery-model")
+    | "--summarizer-model" ->
+        summarizer_model := Some (arg "--summarizer-model")
     | "-h" | "--help" -> usage ()
     | s when not (String.starts_with ~prefix:"--" s) -> query := Some s
     | other ->
@@ -227,6 +254,10 @@ let parse argv : t =
         chaos_seed = !chaos_seed;
         chaos_llm = !chaos_llm;
         chaos_tool = !chaos_tool;
+        planner_model = !planner_model;
+        executor_model = !executor_model;
+        recovery_model = !recovery_model;
+        summarizer_model = !summarizer_model;
       }
 
 (** Build the "[active] ..." status line as a list of flag descriptions
@@ -264,5 +295,20 @@ let active_flags (args : t) : string list =
          (Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)"
             args.chaos_seed args.chaos_llm args.chaos_tool)
      else None);
+    (let parts =
+       List.filter_map
+         (fun (label, m) ->
+           match m with
+           | Some name -> Some (Printf.sprintf "%s=%s" label name)
+           | None -> None)
+         [
+           ("plan", args.planner_model);
+           ("exec", args.executor_model);
+           ("rec", args.recovery_model);
+           ("sum", args.summarizer_model);
+         ]
+     in
+     if parts = [] then None
+     else Some (Printf.sprintf "model-override(%s)" (String.concat "," parts)));
   ]
   |> List.filter_map Fun.id

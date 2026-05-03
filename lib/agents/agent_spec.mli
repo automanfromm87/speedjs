@@ -68,6 +68,14 @@ type t = {
           authority. *)
   strategy : Context.Strategy.t;
   max_iters : int;
+  model : string option;
+      (** Per-spec model override. [None] inherits the runtime
+          default; [Some "claude-..."] routes this leaf agent's LLM
+          calls to a specific model. The whole handler stack (cost
+          tracking, cache, retry, trace) still applies — only the
+          target model changes. Used by mixed-model plan-act runs:
+          Opus planner + Sonnet executor + Haiku summarizer share one
+          handler stack. *)
   terminal : terminal;
   force_terminal_in_last_n : int;
       (** When [terminal = Tool { name }] and the loop reaches its
@@ -111,6 +119,7 @@ val make :
   ?env:(string * string) list ->
   ?strategy:Context.Strategy.t ->
   ?max_iters:int ->
+  ?model:string ->
   ?terminal:terminal ->
   ?force_terminal_in_last_n:int ->
   tools:tool_def list ->
@@ -128,6 +137,7 @@ val with_skill : Skill.t -> t -> t
 
 val with_max_iters : int -> t -> t
 val with_mode : agent_mode -> t -> t
+val with_model : string option -> t -> t
 val with_terminal : terminal -> t -> t
 val with_terminal_tool : string -> t -> t
 val with_strategy : Context.Strategy.t -> t -> t

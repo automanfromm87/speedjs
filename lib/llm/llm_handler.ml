@@ -46,9 +46,17 @@ end
 let anthropic ?base_url ?proxy ?api_key ?model ?max_tokens ?on_text_delta
     () : t =
  fun args ->
-  Anthropic.complete_stream ?base_url ?proxy ?api_key ?model ?max_tokens
-    ?on_text_delta ~system:args.system_override ~messages:args.messages
-    ~tools:args.tools ~tool_choice:args.tool_choice ()
+  (* Per-call [args.model] takes precedence over install-time [?model].
+     Lets a single handler stack route planner / executor / summarizer
+     to different models while keeping cost / cache / trace middleware
+     uniform. *)
+  let effective_model =
+    match args.model with Some _ as m -> m | None -> model
+  in
+  Anthropic.complete_stream ?base_url ?proxy ?api_key ?model:effective_model
+    ?max_tokens ?on_text_delta ~system:args.system_override
+    ~messages:args.messages ~tools:args.tools ~tool_choice:args.tool_choice
+    ()
 
 (* ===== Middleware ===== *)
 
@@ -87,6 +95,7 @@ let with_cost_tracking ~(cost : cost_state) (inner : t) : t =
     same usage that gets folded into [cost_state]. *)
 let with_tracing ~(tracer : Trace.tracer) ~(model : string) (inner : t) : t =
  fun args ->
+  let span_name = Option.value args.model ~default:model in
   let input_summary =
     Printf.sprintf "msgs=%d tools=%d" (List.length args.messages)
       (List.length args.tools)
@@ -116,7 +125,7 @@ let with_tracing ~(tracer : Trace.tracer) ~(model : string) (inner : t) : t =
     in
     Trace.ok_capture ~output ~tokens ~cost_delta
   in
-  Trace.with_span tracer ~kind:Trace.Llm_call ~name:model
+  Trace.with_span tracer ~kind:Trace.Llm_call ~name:span_name
     ~input_summary ~capture (fun () -> inner args)
 
 (** Log before/after each call. *)

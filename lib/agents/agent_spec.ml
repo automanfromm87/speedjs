@@ -15,6 +15,7 @@ type t = {
   tools : tool_def list;
   strategy : Context.Strategy.t;
   max_iters : int;
+  model : string option;
   terminal : terminal;
   force_terminal_in_last_n : int;
 }
@@ -85,7 +86,8 @@ let default_system_prompt =
 let make ?(name = "agent") ?(mode = Executor)
     ?(system_prompt = default_system_prompt) ?(system_blocks = [])
     ?(env = []) ?(strategy = Context.Strategy.flat)
-    ?(max_iters = default_max_iters) ?(terminal = Free_text)
+    ?(max_iters = default_max_iters) ?(model : string option)
+    ?(terminal = Free_text)
     ?(force_terminal_in_last_n = 2) ~tools () =
   {
     name;
@@ -96,6 +98,7 @@ let make ?(name = "agent") ?(mode = Executor)
     tools;
     strategy;
     max_iters;
+    model;
     terminal;
     force_terminal_in_last_n;
   }
@@ -105,6 +108,7 @@ let with_skill (s : Skill.t) (t : t) : t =
 
 let with_max_iters n t = { t with max_iters = n }
 let with_mode m t = { t with mode = m }
+let with_model m t = { t with model = m }
 let with_terminal x t = { t with terminal = x }
 let with_terminal_tool name t = { t with terminal = Tool { name } }
 let with_strategy s t = { t with strategy = s }

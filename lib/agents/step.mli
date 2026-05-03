@@ -55,6 +55,7 @@ val once :
   ?strategy:Context.Strategy.t ->
   ?tool_choice:tool_choice ->
   ?terminal_tools:string list ->
+  ?model:string option ->
   ctx:Context.t ->
   unit ->
   result

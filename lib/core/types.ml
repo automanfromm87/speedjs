@@ -279,11 +279,18 @@ type llm_call_args = {
   tools : tool_def list;
   system_override : string option;
   tool_choice : tool_choice;
+  model : string option;
+      (** Per-call model override. [None] uses the runtime's default
+          (set at [Llm_handler.anthropic ~model] install time). Lets a
+          plan-act run mix Opus-class planner with Sonnet/Haiku
+          executor on the same handler stack — cost / cache / trace
+          middleware applies uniformly. *)
 }
 
 (** Common case: no overrides, model picks tools freely. *)
 let basic_call ~messages ~tools : llm_call_args =
-  { messages; tools; system_override = None; tool_choice = Tc_auto }
+  { messages; tools; system_override = None; tool_choice = Tc_auto;
+    model = None }
 
 (* ===== Planner shared types =====
    [task] and [plan] are shared by [Planner] (which produces them)

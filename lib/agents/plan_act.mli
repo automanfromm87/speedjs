@@ -62,6 +62,19 @@ type config = {
   memory_dir : string option;
       (** Enables cross-run executor memory persistence. *)
   model : string;
+      (** Default model — used by every leaf without a per-spec
+          override. *)
+  planner_model : string option;
+      (** Override for [Planner.plan]. None inherits [model]. *)
+  executor_model : string option;
+      (** Override for the per-task ReAct loop (carries ~93% of total
+          tokens in our chaos baseline). Set to a cheaper model to cut
+          costs. *)
+  recovery_model : string option;
+      (** Override for [Planner.recover]. None inherits [model]. *)
+  summarizer_model : string option;
+      (** Override for the final synthesizer call. None inherits
+          [model]. *)
   planner_system_prompt : string option;
   executor_system_prompt : string;
       (** Base system prompt for each per-task executor; defaults to

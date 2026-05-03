@@ -126,6 +126,10 @@ let oneshot ~(args : Args.t) ~tools
           memory_dir = args.memory_dir;
           executor_system_blocks = system_blocks;
           restart = args.restart;
+          planner_model = args.planner_model;
+          executor_model = args.executor_model;
+          recovery_model = args.recovery_model;
+          summarizer_model = args.summarizer_model;
         }
       in
       Speedjs.Plan_act.run ~config ~goal:args.query ~tools ()

@@ -41,11 +41,11 @@ let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
 (** Workflow form: planner spec + leaf + terminal-tool projection +
     payload parse. Replaces ~30 lines of try/catch + match ladder with
     three combinators. *)
-let plan_flow ?system_prompt ?max_iterations
+let plan_flow ?system_prompt ?max_iterations ?model
     ?(research_tools : tool_def list = []) ~goal () : plan Workflow.t =
   let open Workflow in
   let spec =
-    Specs.planner ?system_prompt ?max_iters:max_iterations
+    Specs.planner ?system_prompt ?max_iters:max_iterations ?model
       ~tools:research_tools ()
   in
   let user_query =
@@ -61,7 +61,7 @@ let plan_flow ?system_prompt ?max_iterations
   in
   of_result (parse_plan ~goal payload)
 
-let plan ?system_prompt ?max_iterations
+let plan ?system_prompt ?max_iterations ?model
     ?(research_tools : tool_def list = []) ~goal () :
     (plan, agent_error) Result.t =
   let capture (r : (plan, agent_error) Result.t) : Trace.capture_result =
@@ -80,7 +80,8 @@ let plan ?system_prompt ?max_iterations
               (if String.length goal > 80 then String.sub goal 0 80 ^ "..."
                else goal)));
       Workflow.run
-        (plan_flow ?system_prompt ?max_iterations ~research_tools ~goal ()))
+        (plan_flow ?system_prompt ?max_iterations ?model ~research_tools
+           ~goal ()))
 
 (* ===== Plan recovery =====
 
@@ -130,7 +131,7 @@ let parse_recovery_decision (input : Yojson.Safe.t) :
 
 (** Recovery agent. Like [plan] but builds [Specs.recovery] and parses
     [submit_recovery]. *)
-let recover ?max_iterations
+let recover ?max_iterations ?model
     ?(research_tools : tool_def list = []) ?(prior_failures = [])
     ?(cycle_index = 0) ?(max_cycles = 2) ~goal ~completed ~failed_task
     ~failed_error ~remaining () :
@@ -198,7 +199,7 @@ let recover ?max_iterations
       in
       let spec =
         Specs.recovery
-          ~name:recovery_label ?max_iters:max_iterations
+          ~name:recovery_label ?max_iters:max_iterations ?model
           ~tools:research_tools ()
       in
       let flow : recovery_decision Workflow.t =

@@ -219,8 +219,11 @@ let format_task_results plan results =
     in
     String.concat "\n\n" lines
 
-(** Synthesizer LLM call: one final call, no tools, free-text answer. *)
-let summarize_flow ~plan ~results : string Workflow.t =
+(** Synthesizer LLM call: one final call, no tools, free-text answer.
+    [model] picks the synthesizer model — None falls back to runtime
+    default. *)
+let summarize_flow ~(model : string option) ~plan ~results :
+    string Workflow.t =
   let open Workflow in
   let user_msg =
     Printf.sprintf
@@ -234,12 +237,13 @@ let summarize_flow ~plan ~results : string Workflow.t =
           tools = [];
           system_override = Some summarizer_system_prompt;
           tool_choice = Tc_auto;
+          model;
         }
       in
       let response = Effect.perform (Effects.Llm_complete args) in
       Ok (Step.extract_final_text response.content))
 
-let summarize ~plan ~results () : agent_result =
+let summarize ?(model : string option) ~plan ~results () : agent_result =
   let capture (r : agent_result) : Trace.capture_result =
     match r with
     | Ok answer ->
@@ -251,7 +255,7 @@ let summarize ~plan ~results () : agent_result =
   Trace.span_current ~kind:Trace.Phase ~name:"summarizer"
     ~input_summary:plan.goal ~capture (fun () ->
       Effect.perform (Effects.Log "[summarizer] synthesizing final answer");
-      Workflow.run (summarize_flow ~plan ~results))
+      Workflow.run (summarize_flow ~model ~plan ~results))
 
 let executor_memory_name = "executor"
 
@@ -285,6 +289,21 @@ type config = {
   working_dir : string option;
   memory_dir : string option;
   model : string;
+      (** Default model — used by every leaf that doesn't have a
+          per-spec override. Kept for back-compat; new code should
+          set the four [*_model] fields below. *)
+  planner_model : string option;
+      (** Override for [Planner.plan]. None inherits [model]. *)
+  executor_model : string option;
+      (** Override for per-task ReAct loop. None inherits [model].
+          Most tokens go through this path — set to a cheaper model
+          (e.g. Haiku) to cut costs, at the risk of lower task
+          completion rate under chaos. *)
+  recovery_model : string option;
+      (** Override for [Planner.recover]. None inherits [model]. *)
+  summarizer_model : string option;
+      (** Override for the final synthesizer call. None inherits
+          [model]. *)
   planner_system_prompt : string option;
   executor_system_prompt : string;
   executor_system_blocks : (string * string) list;
@@ -304,6 +323,10 @@ let default_config =
     working_dir = None;
     memory_dir = None;
     model = Anthropic.default_model;
+    planner_model = None;
+    executor_model = None;
+    recovery_model = None;
+    summarizer_model = None;
     planner_system_prompt = None;
     executor_system_prompt = Agent.default_system_prompt;
     executor_system_blocks = [];
@@ -340,6 +363,7 @@ let executor_spec env =
     ~system_blocks:env.config.executor_system_blocks
     ~strategy:env.executor_strategy
     ~max_iters:env.config.max_iterations_per_task
+    ?model:env.config.executor_model
     ~env:env.exec_env ~tools:env.tools ()
 
 (* Renumber a fresh task list so its [index] continues after the
@@ -457,7 +481,8 @@ let recovery_flow env state task err :
   in
   let remaining_descs = List.map (fun (t : task) -> t.description) state.pending in
   Workflow.of_thunk (fun () ->
-      Planner.recover ~research_tools:env.tools
+      Planner.recover ?model:env.config.recovery_model
+        ~research_tools:env.tools
         ~prior_failures:(List.rev state.prior_failures)
         ~cycle_index:state.recoveries
         ~max_cycles:env.config.max_recoveries
@@ -580,7 +605,7 @@ and finalize_flow env state : string Workflow.t =
     pure
       (Printf.sprintf "%s\n\n%s" header
          (format_task_results summary_plan results))
-  else summarize_flow ~plan:summary_plan ~results
+  else summarize_flow ~model:env.config.summarizer_model ~plan:summary_plan ~results
 
 (* ===== Plan / resume ===== *)
 
@@ -602,7 +627,8 @@ let plan_or_resume_flow ~config ~goal ~goal_for_planner ~tools
   | None ->
       of_thunk (fun () ->
           Planner.plan ?system_prompt:config.planner_system_prompt
-            ~research_tools:tools ~goal:goal_for_planner ())
+            ?model:config.planner_model ~research_tools:tools
+            ~goal:goal_for_planner ())
   |> fun plan_flow ->
   let* p = plan_flow in
   let* () =

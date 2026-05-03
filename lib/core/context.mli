@@ -133,9 +133,14 @@ end
     Returns "" when all three are empty. *)
 val render_system : t -> string
 
-(** Materialize for one [Llm_complete] call. *)
+(** Materialize for one [Llm_complete] call. [model] is set on the
+    resulting [llm_call_args.model]: [None] inherits the runtime
+    default; [Some "claude-..."] overrides per call (used by mixed-
+    model plan-act runs to route planner / executor to different
+    models). *)
 val to_llm_args :
   ?strategy:Strategy.t ->
   ?tool_choice:tool_choice ->
+  ?model:string option ->
   t ->
   llm_call_args

@@ -31,32 +31,40 @@ val submit_task_result_name : string
 
 (** Planner role: read-only research + [submit_plan]. The provided
     [tools] are filtered through [tools_for_mode Planner] when the
-    spec is executed; mutating tools are dropped automatically. *)
+    spec is executed; mutating tools are dropped automatically.
+    [model] routes this spec's LLM calls to a specific model
+    ([None] = runtime default). *)
 val planner :
   ?system_prompt:string ->
   ?max_iters:int ->
+  ?model:string ->
   tools:tool_def list ->
   unit ->
   Agent_spec.validated
 
 (** Recovery role: same surface as planner, terminates on
     [submit_recovery]. [name] defaults to ["recovery"] but callers
-    typically override per-cycle (e.g. ["recovery#0"]). *)
+    typically override per-cycle (e.g. ["recovery#0"]). [model] like
+    {!planner}. *)
 val recovery :
   ?name:string ->
   ?system_prompt:string ->
   ?max_iters:int ->
+  ?model:string ->
   tools:tool_def list ->
   unit ->
   Agent_spec.validated
 
 (** Executor role: full tool surface + [submit_task_result] terminal.
-    Used inside [Plan_act] for one-task ReAct runs. *)
+    Used inside [Plan_act] for one-task ReAct runs. [model] like
+    {!planner}; this is the highest-token-volume call site, so model
+    choice here dominates the run's cost. *)
 val executor :
   ?system_prompt:string ->
   ?system_blocks:(string * string) list ->
   ?strategy:Context.Strategy.t ->
   ?max_iters:int ->
+  ?model:string ->
   ?env:(string * string) list ->
   tools:tool_def list ->
   unit ->
@@ -68,6 +76,7 @@ val chat :
   ?system_prompt:string ->
   ?system_blocks:(string * string) list ->
   ?max_iters:int ->
+  ?model:string ->
   tools:tool_def list ->
   unit ->
   Agent_spec.validated
@@ -81,6 +90,7 @@ val chat :
 val subagent :
   ?system_prompt:string ->
   ?max_iters:int ->
+  ?model:string ->
   tools:tool_def list ->
   unit ->
   Agent_spec.validated

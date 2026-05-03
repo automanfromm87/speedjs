@@ -225,11 +225,11 @@ let render_system t =
   in
   String.concat "\n\n" parts
 
-let to_llm_args ?(strategy = Strategy.flat) ?(tool_choice = Tc_auto) t :
-    llm_call_args =
+let to_llm_args ?(strategy = Strategy.flat) ?(tool_choice = Tc_auto)
+    ?(model : string option = None) t : llm_call_args =
   let messages = Strategy.apply strategy (Conversation.to_messages t.conversation) in
   let system_override =
     let s = render_system t in
     if s = "" then None else Some s
   in
-  { messages; tools = t.tools; system_override; tool_choice }
+  { messages; tools = t.tools; system_override; tool_choice; model }

@@ -267,13 +267,14 @@ let validate_or_bug ~role spec =
            role msg)
 
 let planner ?(system_prompt = default_planner_prompt)
-    ?(max_iters = default_planner_max_iters) ~tools () :
+    ?(max_iters = default_planner_max_iters) ?model ~tools () :
     Agent_spec.validated =
   Agent_spec.make
     ~name:"planner"
     ~mode:Planner
     ~system_prompt
     ~max_iters
+    ?model
     ~terminal:(Agent_spec.Tool { name = submit_plan_name })
     ~tools:(tools @ [ submit_plan_tool ])
     ()
@@ -281,13 +282,14 @@ let planner ?(system_prompt = default_planner_prompt)
 
 let recovery ?(name = "recovery")
     ?(system_prompt = default_recovery_prompt)
-    ?(max_iters = default_planner_max_iters) ~tools () :
+    ?(max_iters = default_planner_max_iters) ?model ~tools () :
     Agent_spec.validated =
   Agent_spec.make
     ~name
     ~mode:Recovery
     ~system_prompt
     ~max_iters
+    ?model
     ~terminal:(Agent_spec.Tool { name = submit_recovery_name })
     ~tools:(tools @ [ submit_recovery_tool ])
     ()
@@ -295,8 +297,8 @@ let recovery ?(name = "recovery")
 
 let executor ?(system_prompt = Agent_spec.default_system_prompt)
     ?(system_blocks = []) ?(strategy = Context.Strategy.flat)
-    ?(max_iters = Agent_spec.default_max_iters) ?(env = []) ~tools () :
-    Agent_spec.validated =
+    ?(max_iters = Agent_spec.default_max_iters) ?model ?(env = [])
+    ~tools () : Agent_spec.validated =
   Agent_spec.make
     ~name:"executor"
     ~mode:Executor
@@ -304,6 +306,7 @@ let executor ?(system_prompt = Agent_spec.default_system_prompt)
     ~system_blocks
     ~strategy
     ~max_iters
+    ?model
     ~env
     ~terminal:(Agent_spec.Tool { name = submit_task_result_name })
     ~tools:(tools @ [ submit_task_result_tool ])
@@ -312,26 +315,28 @@ let executor ?(system_prompt = Agent_spec.default_system_prompt)
 
 let chat ?(system_prompt = Agent_spec.default_system_prompt)
     ?(system_blocks = []) ?(max_iters = Agent_spec.default_max_iters)
-    ~tools () : Agent_spec.validated =
+    ?model ~tools () : Agent_spec.validated =
   Agent_spec.make
     ~name:"agent"
     ~mode:Executor
     ~system_prompt
     ~system_blocks
     ~max_iters
+    ?model
     ~terminal:Agent_spec.Free_text
     ~tools
     ()
   |> validate_or_bug ~role:"chat"
 
 let subagent ?(system_prompt = Agent_spec.default_system_prompt)
-    ?(max_iters = Agent_spec.default_max_iters) ~tools () :
+    ?(max_iters = Agent_spec.default_max_iters) ?model ~tools () :
     Agent_spec.validated =
   Agent_spec.make
     ~name:"subagent"
     ~mode:Subagent
     ~system_prompt
     ~max_iters
+    ?model
     ~terminal:Agent_spec.Free_text
     ~tools
     ()

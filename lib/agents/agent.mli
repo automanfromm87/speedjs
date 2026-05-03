@@ -110,6 +110,7 @@ val run_loop :
   ?force_terminal_in_last_n:int ->
   ?strategy:Context.Strategy.t ->
   ?name:string ->
+  ?model:string option ->
   ctx:Context.t ->
   unit ->
   (string * Context.t, agent_error * Context.t) Result.t
