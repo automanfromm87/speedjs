@@ -69,11 +69,52 @@ let session ~(args : Args.t) ~path ~tools
       print_endline "================================================";
       1
 
+(** Set up [working_dir] for per-task git checkpointing under [--plan]:
+    create the directory + git repo + initial commit on first run, and
+    hard-fail on a dirty pre-existing tree (otherwise rollback would
+    silently destroy uncommitted user work). *)
+let prepare_checkpoint_dir cwd : (unit, string) result =
+  let ( let* ) = Result.bind in
+  (if not (Sys.file_exists cwd) then
+     try
+       Unix.mkdir cwd 0o755;
+       Ok ()
+     with Unix.Unix_error (e, _, _) ->
+       Error (Printf.sprintf "mkdir %s: %s" cwd (Unix.error_message e))
+   else if not (Sys.is_directory cwd) then
+     Error (Printf.sprintf "%s exists but is not a directory" cwd)
+   else Ok ())
+  |> fun r ->
+  let* () = r in
+  let* () =
+    if Speedjs.Git_checkpoint.is_git_repo ~cwd then Ok ()
+    else
+      match
+        Sys.command
+          (Printf.sprintf "git -C %s init --quiet" (Filename.quote cwd))
+      with
+      | 0 -> Ok ()
+      | n -> Error (Printf.sprintf "git init at %s exited %d" cwd n)
+  in
+  let* () = Speedjs.Git_checkpoint.ensure_initial_commit ~cwd in
+  Speedjs.Git_checkpoint.validate_clean_repo ~cwd
+
 (** One-shot mode: plan-act flow when [--plan] is set, otherwise pure
     ReAct. Returns the process exit code. *)
 let oneshot ~(args : Args.t) ~tools
     ?(system_blocks : (string * string) list = [])
     ~run_with_runtime () : int =
+  (* Hard-fail BEFORE the runtime starts: dirty working dir would let
+     a failed-task rollback destroy uncommitted user work. *)
+  (match (args.plan, args.working_dir) with
+  | true, Some cwd -> (
+      match prepare_checkpoint_dir cwd with
+      | Ok () -> ()
+      | Error msg ->
+          Printf.eprintf
+            "speedjs: cannot prepare working dir for plan-act:\n%s\n" msg;
+          exit 1)
+  | _ -> ());
   let agent_thunk () =
     if args.plan then
       let config =

@@ -95,6 +95,27 @@ val with_retry : ?max_attempts:int -> 'a t -> 'a t
     inherited state from the failed body. *)
 val recover : 'a t -> (agent_error -> 'a t) -> 'a t
 
+(** Wrap a flow in a per-task git transaction.
+
+    On entry, capture HEAD at [cwd]. On [Ok], stage all changes and
+    commit with [message ()]; on [Error], hard-reset and clean
+    untracked non-ignored files so retries see the pre-task state.
+
+    [cwd] must be a git repo with at least one commit (use
+    {!Git_checkpoint.validate_clean_repo} at startup to enforce this).
+    If [cwd] is not a git repo, this is a no-op wrapper — the inner
+    flow runs directly with a single warning logged. This degraded
+    mode lets users without a git-managed working dir still drive
+    plan-act, at the cost of leaking failed-attempt side effects.
+
+    Composition: this combinator should be the {b inner} layer of
+    retry — [with_retry (with_checkpoint ~cwd ~message body)] — so
+    each retry attempt creates a fresh checkpoint, captures the
+    actually-rolled-back base, and only the final winning attempt
+    commits. *)
+val with_checkpoint :
+  cwd:string -> message:(unit -> string) -> 'a t -> 'a t
+
 (** Reify the result: any inner error becomes [Ok (Error e)], any
     inner success becomes [Ok (Ok v)]. Lets callers branch on
     success / failure with full pattern matching, instead of being

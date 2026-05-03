@@ -96,6 +96,46 @@ let recover (body : 'a t) (handler : agent_error -> 'a t) : 'a t =
   | Ok _ as r -> r
   | Error e -> handler e ()
 
+let with_checkpoint ~cwd ~message (inner : 'a t) : 'a t =
+ fun () ->
+  if not (Git_checkpoint.is_git_repo ~cwd) then (
+    (try
+       Effect.perform
+         (Effects.Log
+            (Printf.sprintf
+               "[checkpoint] %s is not a git repo — running without per-task \
+                rollback"
+               cwd))
+     with Effect.Unhandled _ -> ());
+    inner ())
+  else
+    match Git_checkpoint.create ~cwd with
+    | Error e ->
+        (try
+           Effect.perform
+             (Effects.Log
+                (Printf.sprintf
+                   "[checkpoint] create failed at %s — running without rollback: \
+                    %s"
+                   cwd e))
+         with Effect.Unhandled _ -> ());
+        inner ()
+    | Ok ckpt ->
+        (match inner () with
+         | Ok _ as r ->
+             (match Git_checkpoint.commit ckpt ~message:(message ()) with
+              | Ok _ -> ()
+              | Error e ->
+                  (try
+                     Effect.perform
+                       (Effects.Log
+                          (Printf.sprintf "[checkpoint] commit failed: %s" e))
+                   with Effect.Unhandled _ -> ()));
+             r
+         | Error _ as r ->
+             Git_checkpoint.rollback ckpt;
+             r)
+
 let attempt (body : 'a t) : ('a, agent_error) Result.t t =
  fun () -> Ok (body ())
 

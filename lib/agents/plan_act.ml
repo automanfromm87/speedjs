@@ -430,7 +430,22 @@ let run_task_flow env task : string Workflow.t =
         in
         of_result (Error err))
   in
-  with_retry ~max_attempts:(env.config.max_task_retries + 1) with_rollback
+  (* Per-attempt git checkpoint: if [working_dir] is a git repo, each
+     attempt captures HEAD on entry and either commits on success or
+     hard-resets + cleans on failure. Retries then see the pre-attempt
+     state instead of accumulated chaos-induced side effects (orphan
+     files, partial edits, broken imports). [with_checkpoint] is the
+     inner layer of [with_retry] so each retry creates a fresh ckpt. *)
+  let body_with_ckpt =
+    match env.config.working_dir with
+    | Some cwd ->
+        with_checkpoint ~cwd
+          ~message:(fun () ->
+            Printf.sprintf "task %d: %s" task.index task.description)
+          with_rollback
+    | None -> with_rollback
+  in
+  with_retry ~max_attempts:(env.config.max_task_retries + 1) body_with_ckpt
 
 (* ===== Recovery flow =====
    Consult the recovery planner. Returns a {!Planner.recovery_decision}

@@ -18,4 +18,5 @@ let () =
   Test_cache_stability.run ();
   Test_stability.run ();
   Test_chaos.run ();
+  Test_git_checkpoint.run ();
   print_endline "\nAll tests passed.\n"
