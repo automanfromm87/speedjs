@@ -142,5 +142,6 @@ val to_llm_args :
   ?strategy:Strategy.t ->
   ?tool_choice:tool_choice ->
   ?model:string option ->
+  ?purpose:llm_purpose ->
   t ->
   llm_call_args

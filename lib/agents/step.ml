@@ -98,8 +98,11 @@ let find_pause_block ~(tools : tool_def list)
 
 let once ?(strategy = Context.Strategy.flat) ?(tool_choice = Tc_auto)
     ?(terminal_tools : string list = [])
-    ?(model : string option = None) ~(ctx : Context.t) () : result =
-  let args = Context.to_llm_args ~strategy ~tool_choice ~model ctx in
+    ?(model : string option = None)
+    ?(purpose : llm_purpose = `Other) ~(ctx : Context.t) () : result =
+  let args =
+    Context.to_llm_args ~strategy ~tool_choice ~model ~purpose ctx
+  in
   let response = Effect.perform (Effects.Llm_complete args) in
   Effect.perform
     (Effects.Log

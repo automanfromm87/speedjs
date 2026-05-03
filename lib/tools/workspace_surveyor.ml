@@ -178,6 +178,7 @@ let summarize ~working_dir ~raw : string =
       system_override = Some summarize_system_prompt;
       tool_choice = Tc_auto;
       model = None;
+      purpose = `Other;
     }
   in
   Trace.span_current ~kind:Trace.Phase ~name:"surveyor"

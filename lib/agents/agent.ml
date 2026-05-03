@@ -22,6 +22,7 @@ let run_loop ?(max_iterations = default_max_iterations)
     ?(force_terminal_in_last_n = 2)
     ?(strategy = Context.Strategy.flat) ?(name = "agent")
     ?(model : string option = None)
+    ?(purpose : llm_purpose = `Other)
     ~(ctx : Context.t) () :
     (string * Context.t, agent_error * Context.t) Result.t =
   let endgame_iter_threshold =
@@ -74,7 +75,8 @@ let run_loop ?(max_iterations = default_max_iterations)
           ~name:(Printf.sprintf "%s:iter:%d" name iter)
           ~input_summary:"" ~capture
           (fun () ->
-            Step.once ~strategy ~tool_choice ~terminal_tools ~model ~ctx ())
+            Step.once ~strategy ~tool_choice ~terminal_tools ~model
+              ~purpose ~ctx ())
       in
       match outcome with
       | Step.Continue ctx -> loop ctx (iter + 1)
@@ -173,7 +175,8 @@ let execute_raw ~(spec : Agent_spec.validated) ~(input : input) : output =
          run_loop ~max_iterations:inner.max_iters
            ~strategy:inner.strategy ~terminal_tools
            ~force_terminal_in_last_n:inner.force_terminal_in_last_n
-           ~name:inner.name ~model:inner.model ~ctx ()
+           ~name:inner.name ~model:inner.model
+           ~purpose:inner.purpose ~ctx ()
        with
        | Ok (answer, ctx) -> Done { answer; messages = final_messages ctx }
        | Error (reason, ctx) -> Failed { reason; messages = final_messages ctx })

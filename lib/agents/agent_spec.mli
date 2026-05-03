@@ -73,9 +73,13 @@ type t = {
           default; [Some "claude-..."] routes this leaf agent's LLM
           calls to a specific model. The whole handler stack (cost
           tracking, cache, retry, trace) still applies — only the
-          target model changes. Used by mixed-model plan-act runs:
-          Opus planner + Sonnet executor + Haiku summarizer share one
-          handler stack. *)
+          target model changes. *)
+  purpose : llm_purpose;
+      (** Caller-intent tag set by [Specs.{planner,executor,recovery,
+          chat,subagent}]. Plumbed through to [llm_call_args.purpose]
+          on every LLM call this spec drives, so middleware can branch
+          on role (e.g. per-purpose chaos rates). Default [`Other] for
+          ad-hoc constructions. *)
   terminal : terminal;
   force_terminal_in_last_n : int;
       (** When [terminal = Tool { name }] and the loop reaches its
@@ -120,6 +124,7 @@ val make :
   ?strategy:Context.Strategy.t ->
   ?max_iters:int ->
   ?model:string ->
+  ?purpose:llm_purpose ->
   ?terminal:terminal ->
   ?force_terminal_in_last_n:int ->
   tools:tool_def list ->

@@ -16,6 +16,7 @@ type t = {
   strategy : Context.Strategy.t;
   max_iters : int;
   model : string option;
+  purpose : llm_purpose;
   terminal : terminal;
   force_terminal_in_last_n : int;
 }
@@ -87,6 +88,7 @@ let make ?(name = "agent") ?(mode = Executor)
     ?(system_prompt = default_system_prompt) ?(system_blocks = [])
     ?(env = []) ?(strategy = Context.Strategy.flat)
     ?(max_iters = default_max_iters) ?(model : string option)
+    ?(purpose : llm_purpose = `Other)
     ?(terminal = Free_text)
     ?(force_terminal_in_last_n = 2) ~tools () =
   {
@@ -99,6 +101,7 @@ let make ?(name = "agent") ?(mode = Executor)
     strategy;
     max_iters;
     model;
+    purpose;
     terminal;
     force_terminal_in_last_n;
   }

@@ -255,6 +255,7 @@ let summarize_flow ~(model : string option) ~plan ~results :
             system_override = Some summarizer_system_prompt;
             tool_choice = Tc_auto;
             model;
+            purpose = `Summarizer;
           }
         in
         (* Catch Llm_api_error and convert to Result.Error so the

@@ -268,12 +268,20 @@ let rec agent_error_pp = function
     instead. *)
 type agent_result = (string, agent_error) Result.t
 
-(** Arguments to one LLM call. Carried by the [Llm_complete] effect.
+(** Caller-intent tag carried on every LLM call so middleware
+    (chaos / tracing / future routing) can branch on the SEMANTIC
+    role of the call rather than guessing from prompt content or
+    model name. Polymorphic variant to avoid clashing with the
+    existing [agent_mode] constructors. *)
+type llm_purpose =
+  [ `Planner
+  | `Executor
+  | `Recovery
+  | `Summarizer
+  | `Subagent
+  | `Other  (** workspace_surveyor, ad-hoc utility calls. *)
+  ]
 
-    [system_override] = [None] means use whatever default the production
-    handler was configured with. Set [Some "..."] to override per-call —
-    the planner agent uses this to inject a planning-specific system prompt
-    while keeping the same handler stack (cost tracking, streaming, etc.). *)
 type llm_call_args = {
   messages : message list;
   tools : tool_def list;
@@ -285,12 +293,25 @@ type llm_call_args = {
           plan-act run mix Opus-class planner with Sonnet/Haiku
           executor on the same handler stack — cost / cache / trace
           middleware applies uniformly. *)
+  purpose : llm_purpose;
+      (** What this call is FOR. Lets [Chaos.with_llm] (and any future
+          per-role middleware) apply different rates / policies to
+          planner vs executor vs recovery without inspecting prompts.
+          Defaults to [Other] when not set. *)
 }
 
 (** Common case: no overrides, model picks tools freely. *)
 let basic_call ~messages ~tools : llm_call_args =
   { messages; tools; system_override = None; tool_choice = Tc_auto;
-    model = None }
+    model = None; purpose = `Other }
+
+let llm_purpose_to_string : llm_purpose -> string = function
+  | `Planner -> "planner"
+  | `Executor -> "executor"
+  | `Recovery -> "recovery"
+  | `Summarizer -> "summarizer"
+  | `Subagent -> "subagent"
+  | `Other -> "other"
 
 (* ===== Planner shared types =====
    [task] and [plan] are shared by [Planner] (which produces them)

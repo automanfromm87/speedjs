@@ -93,6 +93,17 @@ type t = {
   chaos_tool : float;
       (** [0.0–1.0] probability of injecting a tool failure per
           dispatch. *)
+  chaos_llm_planner : float option;
+  chaos_llm_executor : float option;
+  chaos_llm_recovery : float option;
+  chaos_llm_summarizer : float option;
+  chaos_llm_subagent : float option;
+      (** Per-purpose LLM chaos rate overrides. [Some r] uses [r] for
+          that purpose's calls; [None] falls back to [chaos_llm].
+          Lets you target failures at a specific role (e.g.,
+          --chaos-llm-executor 0.30 with --chaos-llm 0.0 stresses
+          only the executor while keeping planner / recovery /
+          summarizer pristine). *)
   planner_model : string option;
       (** Override model for [Planner.plan]. None = inherit
           [SPEEDJS_MODEL] / default. *)
@@ -143,6 +154,12 @@ let usage () =
     "    (probabilistic failure injection — exercises retry / recovery";
   prerr_endline
     "     paths; 0.0 = off. Same seed reproduces the same failure sequence.)";
+  prerr_endline
+    "  --chaos-llm-{planner,executor,recovery,summarizer,subagent} R";
+  prerr_endline
+    "    (per-purpose override; falls back to --chaos-llm. Pin failure";
+  prerr_endline
+    "     to a specific role to test cascade vs planner-survival)";
   prerr_endline
     "  --planner-model NAME  --executor-model NAME";
   prerr_endline
@@ -200,6 +217,11 @@ let parse argv : t =
   let chaos_seed = ref 42 in
   let chaos_llm = ref 0.0 in
   let chaos_tool = ref 0.0 in
+  let chaos_llm_planner = ref None in
+  let chaos_llm_executor = ref None in
+  let chaos_llm_recovery = ref None in
+  let chaos_llm_summarizer = ref None in
+  let chaos_llm_subagent = ref None in
   let planner_model = ref None in
   let executor_model = ref None in
   let recovery_model = ref None in
@@ -245,6 +267,16 @@ let parse argv : t =
     | "--chaos-seed" -> chaos_seed := int_of_string (arg "--chaos-seed")
     | "--chaos-llm" -> chaos_llm := float_of_string (arg "--chaos-llm")
     | "--chaos-tool" -> chaos_tool := float_of_string (arg "--chaos-tool")
+    | "--chaos-llm-planner" ->
+        chaos_llm_planner := Some (float_of_string (arg "--chaos-llm-planner"))
+    | "--chaos-llm-executor" ->
+        chaos_llm_executor := Some (float_of_string (arg "--chaos-llm-executor"))
+    | "--chaos-llm-recovery" ->
+        chaos_llm_recovery := Some (float_of_string (arg "--chaos-llm-recovery"))
+    | "--chaos-llm-summarizer" ->
+        chaos_llm_summarizer := Some (float_of_string (arg "--chaos-llm-summarizer"))
+    | "--chaos-llm-subagent" ->
+        chaos_llm_subagent := Some (float_of_string (arg "--chaos-llm-subagent"))
     | "--planner-model" -> planner_model := Some (arg "--planner-model")
     | "--executor-model" -> executor_model := Some (arg "--executor-model")
     | "--recovery-model" -> recovery_model := Some (arg "--recovery-model")
@@ -291,6 +323,11 @@ let parse argv : t =
         chaos_seed = !chaos_seed;
         chaos_llm = !chaos_llm;
         chaos_tool = !chaos_tool;
+        chaos_llm_planner = !chaos_llm_planner;
+        chaos_llm_executor = !chaos_llm_executor;
+        chaos_llm_recovery = !chaos_llm_recovery;
+        chaos_llm_summarizer = !chaos_llm_summarizer;
+        chaos_llm_subagent = !chaos_llm_subagent;
         planner_model = !planner_model;
         executor_model = !executor_model;
         recovery_model = !recovery_model;

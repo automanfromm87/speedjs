@@ -10,6 +10,7 @@ type tool_kind = [ `Transient of string | `Permanent of string ]
 type config = {
   seed : int;
   llm_failure_rate : float;
+  llm_failure_rate_for : llm_purpose -> float option;
   llm_failure_kinds : llm_kind list;
   tool_failure_rate : float;
   tool_failure_kinds : tool_kind list;
@@ -29,6 +30,7 @@ let default : config =
   {
     seed = 42;
     llm_failure_rate = 0.0;
+    llm_failure_rate_for = (fun _ -> None);
     llm_failure_kinds = [];
     tool_failure_rate = 0.0;
     tool_failure_kinds = [];
@@ -39,20 +41,43 @@ let uniform ?(seed = 42) ~rate () : config =
   {
     seed;
     llm_failure_rate = rate;
+    llm_failure_rate_for = (fun _ -> None);
     llm_failure_kinds = [];
     tool_failure_rate = rate;
     tool_failure_kinds = [];
     on_inject = default_on_inject;
   }
 
+let purposes_with_per_purpose_rate (config : config) : (llm_purpose * float) list =
+  List.filter_map
+    (fun p ->
+      match config.llm_failure_rate_for p with
+      | Some r when r > 0.0 -> Some (p, r)
+      | _ -> None)
+    [ `Planner; `Executor; `Recovery; `Summarizer; `Subagent; `Other ]
+
 let is_active config =
-  config.llm_failure_rate > 0.0 || config.tool_failure_rate > 0.0
+  config.llm_failure_rate > 0.0
+  || config.tool_failure_rate > 0.0
+  || purposes_with_per_purpose_rate config <> []
 
 let show config =
   if not (is_active config) then ""
   else
-    Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)" config.seed
-      config.llm_failure_rate config.tool_failure_rate
+    let per_purpose = purposes_with_per_purpose_rate config in
+    let extras =
+      if per_purpose = [] then ""
+      else
+        let parts =
+          List.map
+            (fun (p, r) ->
+              Printf.sprintf "%s=%.2f" (llm_purpose_to_string p) r)
+            per_purpose
+        in
+        Printf.sprintf " | per-purpose: %s" (String.concat ", " parts)
+    in
+    Printf.sprintf "chaos(seed=%d, llm=%.2f, tool=%.2f)%s" config.seed
+      config.llm_failure_rate config.tool_failure_rate extras
 
 (* ===== RNG state ===== *)
 
@@ -99,7 +124,7 @@ let llm_error_of_kind (k : llm_kind) : Llm_error.t =
         { retry_after = Some 0.05; message = "chaos: simulated overload" }
 
 let with_llm (config : config) (inner : Llm_handler.t) : Llm_handler.t =
-  if config.llm_failure_rate <= 0.0 then inner
+  if not (is_active config) then inner
   else
     let rng = make_rng config.seed in
     let pool =
@@ -107,13 +132,22 @@ let with_llm (config : config) (inner : Llm_handler.t) : Llm_handler.t =
       else config.llm_failure_kinds
     in
     fun args ->
-      if Random.State.float rng 1.0 < config.llm_failure_rate then begin
+      let effective_rate =
+        match config.llm_failure_rate_for args.purpose with
+        | Some r -> r
+        | None -> config.llm_failure_rate
+      in
+      if effective_rate > 0.0
+         && Random.State.float rng 1.0 < effective_rate then begin
         match pick_one rng pool with
         | None -> inner args
         | Some k ->
             let err = llm_error_of_kind k in
             config.on_inject ~kind:"LLM"
-              ~detail:(llm_kind_name k);
+              ~detail:
+                (Printf.sprintf "%s/%s"
+                   (llm_purpose_to_string args.purpose)
+                   (llm_kind_name k));
             raise (Llm_error.Llm_api_error err)
       end
       else inner args

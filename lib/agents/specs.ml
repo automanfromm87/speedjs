@@ -340,6 +340,7 @@ let planner ?(system_prompt = default_planner_prompt)
     ~system_prompt
     ~max_iters
     ?model
+    ~purpose:`Planner
     ~terminal:(Agent_spec.Tool { name = submit_plan_name })
     ~tools:(tools @ [ submit_plan_tool ])
     ()
@@ -355,6 +356,7 @@ let recovery ?(name = "recovery")
     ~system_prompt
     ~max_iters
     ?model
+    ~purpose:`Recovery
     ~terminal:(Agent_spec.Tool { name = submit_recovery_name })
     ~tools:(tools @ [ submit_recovery_tool ])
     ()
@@ -372,6 +374,7 @@ let executor ?(system_prompt = Agent_spec.default_system_prompt)
     ~strategy
     ~max_iters
     ?model
+    ~purpose:`Executor
     ~env
     ~terminal:(Agent_spec.Tool { name = submit_task_result_name })
     ~tools:(tools @ [ submit_task_result_tool ])
@@ -388,6 +391,7 @@ let chat ?(system_prompt = Agent_spec.default_system_prompt)
     ~system_blocks
     ~max_iters
     ?model
+    ~purpose:`Executor
     ~terminal:Agent_spec.Free_text
     ~tools
     ()
@@ -402,6 +406,7 @@ let subagent ?(system_prompt = Agent_spec.default_system_prompt)
     ~system_prompt
     ~max_iters
     ?model
+    ~purpose:`Subagent
     ~terminal:Agent_spec.Free_text
     ~tools
     ()

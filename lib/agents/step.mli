@@ -56,6 +56,7 @@ val once :
   ?tool_choice:tool_choice ->
   ?terminal_tools:string list ->
   ?model:string option ->
+  ?purpose:llm_purpose ->
   ctx:Context.t ->
   unit ->
   result

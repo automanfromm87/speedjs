@@ -167,6 +167,15 @@ let runtime_config_of_args (args : Args.t) ~model ~cost ~on_log
         Speedjs.Chaos.default with
         seed = args.chaos_seed;
         llm_failure_rate = args.chaos_llm;
+        llm_failure_rate_for =
+          (fun (p : Speedjs.Types.llm_purpose) ->
+            match p with
+            | `Planner -> args.chaos_llm_planner
+            | `Executor -> args.chaos_llm_executor
+            | `Recovery -> args.chaos_llm_recovery
+            | `Summarizer -> args.chaos_llm_summarizer
+            | `Subagent -> args.chaos_llm_subagent
+            | `Other -> None);
         tool_failure_rate = args.chaos_tool;
       };
   }

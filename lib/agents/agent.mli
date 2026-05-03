@@ -111,6 +111,7 @@ val run_loop :
   ?strategy:Context.Strategy.t ->
   ?name:string ->
   ?model:string option ->
+  ?purpose:llm_purpose ->
   ctx:Context.t ->
   unit ->
   (string * Context.t, agent_error * Context.t) Result.t

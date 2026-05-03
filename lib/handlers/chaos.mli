@@ -23,7 +23,16 @@ type config = {
   seed : int;
       (** RNG seed. Same seed + same inputs → reproducible chaos sequence. *)
   llm_failure_rate : float;
-      (** Probability per LLM call of injecting a failure (0.0 – 1.0). *)
+      (** Default per-LLM-call failure rate (0.0 – 1.0). Used as
+          fallback when [llm_failure_rate_for] returns [None] for the
+          call's [purpose]. *)
+  llm_failure_rate_for : llm_purpose -> float option;
+      (** Per-purpose override. When the resolved rate is [Some r],
+          [r] is used; [None] falls back to [llm_failure_rate]. The
+          default is [fun _ -> None] which routes everything to the
+          shared rate. Lets a CLI like [--chaos-llm-executor 0.20
+          --chaos-llm-planner 0.0] target failures at the executor
+          path without disturbing planner / recovery / summarizer. *)
   llm_failure_kinds : llm_kind list;
       (** Pool of LLM failure types to pick from when injecting. Empty
           list = use all kinds. *)

@@ -32,8 +32,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SPEEDJS_LOG:-/tmp/speedjs-dag.log}"
 PROJECT_DIR="${SPEEDJS_PROJECT:-/tmp/notes-dag}"
 TRACE_FILE="${SPEEDJS_TRACE:-/tmp/speedjs-dag-trace.ndjson}"
-CHAOS_LLM="${CHAOS_LLM:-0.20}"
-CHAOS_TOOL="${CHAOS_TOOL:-0.10}"
+CHAOS_LLM="${CHAOS_LLM:-0.0}"
+CHAOS_TOOL="${CHAOS_TOOL:-0.0}"
+# Per-purpose overrides — pin failures to executor only by default so
+# the planner survives long enough to actually emit a DAG and we can
+# observe cascade. Set to 0.0 or unset to drop back to global rate.
+CHAOS_LLM_PLANNER="${CHAOS_LLM_PLANNER:-0.0}"
+CHAOS_LLM_EXECUTOR="${CHAOS_LLM_EXECUTOR:-0.30}"
+CHAOS_LLM_RECOVERY="${CHAOS_LLM_RECOVERY:-0.0}"
+CHAOS_LLM_SUMMARIZER="${CHAOS_LLM_SUMMARIZER:-0.0}"
 
 OPEN_FLAG=()
 [ -z "${SPEEDJS_NO_OPEN:-}" ] && OPEN_FLAG=(--trace-open)
@@ -44,7 +51,9 @@ rm -rf "$PROJECT_DIR" /tmp/speedjs-dag-memory
 echo "→ project:    $PROJECT_DIR"
 echo "→ logs:       $LOG_FILE   (tail -f to follow)"
 echo "→ trace:      $TRACE_FILE  → ${TRACE_FILE%.*}.html"
-echo "→ chaos:      llm=$CHAOS_LLM  tool=$CHAOS_TOOL"
+echo "→ chaos:      global llm=$CHAOS_LLM tool=$CHAOS_TOOL"
+echo "             per-purpose: planner=$CHAOS_LLM_PLANNER  executor=$CHAOS_LLM_EXECUTOR"
+echo "                         recovery=$CHAOS_LLM_RECOVERY  summarizer=$CHAOS_LLM_SUMMARIZER"
 echo "→ analyze:    grep -aE '^\\s+[0-9]+\\.|cascade|task_(started|failed|completed)' \$LOG_FILE"
 echo
 
@@ -60,6 +69,10 @@ dune exec speedjs -- \
   --trace-file "$TRACE_FILE" \
   --chaos-llm "$CHAOS_LLM" \
   --chaos-tool "$CHAOS_TOOL" \
+  --chaos-llm-planner "$CHAOS_LLM_PLANNER" \
+  --chaos-llm-executor "$CHAOS_LLM_EXECUTOR" \
+  --chaos-llm-recovery "$CHAOS_LLM_RECOVERY" \
+  --chaos-llm-summarizer "$CHAOS_LLM_SUMMARIZER" \
   "${OPEN_FLAG[@]}" \
   "Run TWO INDEPENDENT computation branches and a final report:
 

@@ -60,6 +60,7 @@ let test_llm_handler_chain_validates_messages () =
       system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
     }
   in
   (try
@@ -94,6 +95,7 @@ let test_llm_handler_chain_cost_tracking () =
         system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
       }
   in
   let _ =
@@ -104,6 +106,7 @@ let test_llm_handler_chain_cost_tracking () =
         system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
       }
   in
   assert (cost.calls = 2);
@@ -147,6 +150,7 @@ let test_llm_handler_chain_retry_recovers () =
         system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
       }
   in
   assert (!attempts = 3);
@@ -172,6 +176,7 @@ let test_llm_handler_chain_retry_fails_fast_on_auth () =
            system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
          }
      in
      failwith "expected Auth to be re-raised"
@@ -246,6 +251,7 @@ let test_llm_handler_compaction_on_overflow () =
         system_override = None;
       model = None;
       tool_choice = Tc_auto;
+      purpose = `Other;
       }
   in
   assert (!calls = 2);
@@ -314,6 +320,7 @@ let test_anthropic_handler_uses_per_call_model () =
         system_override = None;
         tool_choice = Tc_auto;
         model = Some "claude-opus-4-7";
+        purpose = `Other;
       }
   in
   assert (!chosen = Some "claude-opus-4-7");
