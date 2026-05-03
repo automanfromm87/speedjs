@@ -6,8 +6,9 @@ type t = {
 }
 
 (* Run git, capture stdout. argv-based (no shell), so paths can't be
-   command-injected. Returns Error with the captured stderr on non-zero
-   exit so callers can surface useful diagnostics. *)
+   command-injected. Drains stdout + stderr concurrently with select —
+   sequential drain deadlocks when stderr fills its pipe buffer (~64KiB)
+   before stdout closes (e.g. git status with thousands of files). *)
 let run_git ~cwd (args : string list) : (string, string) result =
   let argv = Array.of_list ("git" :: "-C" :: cwd :: args) in
   let stdout_r, stdout_w = Unix.pipe ~cloexec:true () in
@@ -17,21 +18,29 @@ let run_git ~cwd (args : string list) : (string, string) result =
   in
   Unix.close stdout_w;
   Unix.close stderr_w;
-  let drain fd =
-    let buf = Buffer.create 256 in
-    let chunk = Bytes.create 4096 in
-    let rec loop () =
-      let n = try Unix.read fd chunk 0 4096 with Unix.Unix_error _ -> 0 in
-      if n > 0 then (
-        Buffer.add_subbytes buf chunk 0 n;
-        loop ())
-    in
-    loop ();
-    Unix.close fd;
-    Buffer.contents buf
+  let out_buf = Buffer.create 256 in
+  let err_buf = Buffer.create 256 in
+  let chunk = Bytes.create 4096 in
+  let read_into fd buf =
+    match Unix.read fd chunk 0 4096 with
+    | 0 -> false
+    | n -> Buffer.add_subbytes buf chunk 0 n; true
+    | exception Unix.Unix_error _ -> false
   in
-  let out = drain stdout_r in
-  let err = drain stderr_r in
+  let open_fds = ref [ stdout_r; stderr_r ] in
+  while !open_fds <> [] do
+    let ready, _, _ = Unix.select !open_fds [] [] (-1.0) in
+    List.iter
+      (fun fd ->
+        let buf = if fd = stdout_r then out_buf else err_buf in
+        if not (read_into fd buf) then begin
+          Unix.close fd;
+          open_fds := List.filter (fun f -> f <> fd) !open_fds
+        end)
+      ready
+  done;
+  let out = Buffer.contents out_buf in
+  let err = Buffer.contents err_buf in
   let _, status = Unix.waitpid [] pid in
   match status with
   | Unix.WEXITED 0 -> Ok (String.trim out)

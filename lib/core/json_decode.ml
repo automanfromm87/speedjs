@@ -45,3 +45,14 @@ let get_list_field_or_empty name fields =
   match List.assoc_opt name fields with
   | Some (`List items) -> items
   | _ -> []
+
+(** Get a list-of-positive-int field; missing / wrong-typed / non-int
+    elements / non-positive ints → empty list. Used for [depends_on]
+    in plan / recovery / plan_state parsers. *)
+let get_pos_int_list_field_or_empty name fields =
+  match List.assoc_opt name fields with
+  | Some (`List items) ->
+      List.filter_map
+        (function `Int n when n >= 1 -> Some n | _ -> None)
+        items
+  | _ -> []

@@ -49,12 +49,7 @@ let task_of_json = function
         Json_decode.get_string_field_or "description" ~default:"" fs
       in
       let depends_on =
-        match List.assoc_opt "depends_on" fs with
-        | Some (`List xs) ->
-            List.filter_map
-              (function `Int n -> Some n | _ -> None)
-              xs
-        | _ -> []  (* v2 files don't have this field — Sequential default *)
+        Json_decode.get_pos_int_list_field_or_empty "depends_on" fs
       in
       { index; description; depends_on }
   | _ -> failwith "task must be JSON object"

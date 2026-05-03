@@ -64,8 +64,7 @@ type config = {
   memory_dir : string option;
       (** Enables cross-run executor memory persistence. *)
   model : string;
-      (** Default model — used by every leaf without a per-spec
-          override. *)
+      (** Default model used when a per-role override below is [None]. *)
   plan_mode : plan_mode;
       (** [`Sequential] (default) or [`Dag]. *)
   planner_model : string option;

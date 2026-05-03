@@ -258,14 +258,9 @@ let summarize_flow ~(model : string option) ~plan ~results :
             purpose = `Summarizer;
           }
         in
-        (* Catch Llm_api_error and convert to Result.Error so the
-           outer with_retry / recover can see it. Without this catch,
-           a chaos-injected (or real upstream) LLM error here flies
-           past every workflow combinator straight to the protection
-           layer and kills the whole run AFTER all tasks have
-           succeeded — losing the whole plan's output for one
-           summarizer hiccup. Mirrors the same fix in [Agent.execute]
-           for ReAct-loop LLM calls. *)
+        (* Workflow combinators only catch [Result.Error]; converting
+           the exception here is what lets [with_retry] / [recover]
+           below react to LLM failures. *)
         try
           let response = Effect.perform (Effects.Llm_complete args) in
           Ok (Step.extract_final_text response.content)
@@ -749,13 +744,9 @@ and handle_failure_flow env state task err rest :
            env.config.max_recoveries)
       ~pending:rest
   else
-    (* Wrap recovery in [with_retry] so a transient chaos hit on the
-       recovery LLM call doesn't waste a recovery cycle on no decision.
-       The cycle counter advances on the OUTER planner outcome (post-
-       retries); retries here are just to give the planner a chance to
-       produce some decision. Llm_handler.with_retry already handles
-       retryable API errors, but won't retry [auth] / [context_window]
-       / [bad_request], which is exactly what chaos likes to inject. *)
+    (* Outer retry: a non-retryable LLM error here (auth, context_window,
+       bad_request — what Llm_handler.with_retry won't retry) shouldn't
+       burn a recovery cycle without producing any decision. *)
     let* decision_result =
       attempt
         (with_retry ~max_attempts:2 (recovery_flow env state task err_str))

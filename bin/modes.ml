@@ -75,17 +75,15 @@ let session ~(args : Args.t) ~path ~tools
     silently destroy uncommitted user work). *)
 let prepare_checkpoint_dir cwd : (unit, string) result =
   let ( let* ) = Result.bind in
-  (if not (Sys.file_exists cwd) then
-     try
-       Unix.mkdir cwd 0o755;
-       Ok ()
-     with Unix.Unix_error (e, _, _) ->
-       Error (Printf.sprintf "mkdir %s: %s" cwd (Unix.error_message e))
-   else if not (Sys.is_directory cwd) then
-     Error (Printf.sprintf "%s exists but is not a directory" cwd)
-   else Ok ())
-  |> fun r ->
-  let* () = r in
+  let* () =
+    match Unix.mkdir cwd 0o755 with
+    | () -> Ok ()
+    | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
+        if Sys.is_directory cwd then Ok ()
+        else Error (Printf.sprintf "%s exists but is not a directory" cwd)
+    | exception Unix.Unix_error (e, _, _) ->
+        Error (Printf.sprintf "mkdir %s: %s" cwd (Unix.error_message e))
+  in
   let* () =
     if Speedjs.Git_checkpoint.is_git_repo ~cwd then Ok ()
     else

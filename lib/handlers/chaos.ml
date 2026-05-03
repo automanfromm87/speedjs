@@ -54,7 +54,7 @@ let purposes_with_per_purpose_rate (config : config) : (llm_purpose * float) lis
       match config.llm_failure_rate_for p with
       | Some r when r > 0.0 -> Some (p, r)
       | _ -> None)
-    [ `Planner; `Executor; `Recovery; `Summarizer; `Subagent; `Other ]
+    llm_purpose_all
 
 let is_active config =
   config.llm_failure_rate > 0.0

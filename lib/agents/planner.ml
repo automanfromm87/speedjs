@@ -18,13 +18,6 @@ let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
       in
       (match List.assoc_opt "tasks" fields with
       | Some (`List items) ->
-          let parse_dep_list = function
-            | `List xs ->
-                List.filter_map
-                  (function `Int n when n >= 1 -> Some n | _ -> None)
-                  xs
-            | _ -> []
-          in
           let tasks =
             List.mapi
               (fun i j ->
@@ -36,9 +29,8 @@ let parse_plan ~goal (input : Yojson.Safe.t) : (plan, agent_error) Result.t =
                           ~default:"" fs
                       in
                       let deps =
-                        match List.assoc_opt "depends_on" fs with
-                        | Some v -> parse_dep_list v
-                        | None -> []
+                        Json_decode.get_pos_int_list_field_or_empty
+                          "depends_on" fs
                       in
                       (desc, deps)
                   | _ -> ("", [])
@@ -121,12 +113,8 @@ let parse_tasks_field fs =
                  Json_decode.get_string_field_or "description" ~default:"" tfs
                in
                let deps =
-                 match List.assoc_opt "depends_on" tfs with
-                 | Some (`List xs) ->
-                     List.filter_map
-                       (function `Int n when n >= 1 -> Some n | _ -> None)
-                       xs
-                 | _ -> []
+                 Json_decode.get_pos_int_list_field_or_empty
+                   "depends_on" tfs
                in
                (desc, deps)
            | _ -> ("", [])

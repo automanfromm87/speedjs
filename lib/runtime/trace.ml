@@ -245,42 +245,55 @@ let write_file path content =
     Ok ()
   with Sys_error msg -> Error msg
 
+(* Match the substring [needle] starting at byte [i] in [s] without
+   allocating a slice. *)
+let matches_at s i needle =
+  let nlen = String.length needle in
+  let slen = String.length s in
+  if i + nlen > slen then false
+  else
+    let rec loop k =
+      if k = nlen then true
+      else if String.unsafe_get s (i + k) <> String.unsafe_get needle k
+      then false
+      else loop (k + 1)
+    in
+    loop 0
+
 let replace_first ~needle ~replacement haystack =
-  match String.index_opt haystack needle.[0] with
+  let nlen = String.length needle in
+  let hlen = String.length haystack in
+  let rec scan i =
+    if i + nlen > hlen then None
+    else if matches_at haystack i needle then Some i
+    else scan (i + 1)
+  in
+  match scan 0 with
   | None -> None
-  | Some _ ->
-      let nlen = String.length needle in
-      let hlen = String.length haystack in
-      let rec scan i =
-        if i + nlen > hlen then None
-        else if String.sub haystack i nlen = needle then Some i
-        else scan (i + 1)
-      in
-      (match scan 0 with
-       | None -> None
-       | Some i ->
-           Some
-             (String.sub haystack 0 i ^ replacement
-              ^ String.sub haystack (i + nlen) (hlen - i - nlen)))
+  | Some i ->
+      let buf = Buffer.create hlen in
+      Buffer.add_substring buf haystack 0 i;
+      Buffer.add_string buf replacement;
+      Buffer.add_substring buf haystack (i + nlen) (hlen - i - nlen);
+      Some (Buffer.contents buf)
 
 (* The viewer's <script type="application/x-ndjson"> tag accepts raw
-   text up to the next "</script>". The only sequence we must escape
-   is the closing tag itself — even inside JSON the bytes "</script>"
-   in a tool-result string would terminate the script element early.
-   Replace each occurrence with "<\/script>" which JSON parsers and
-   browsers both accept. *)
+   text up to the next "</script>". JSON-quoted strings inside the
+   ndjson can contain literal "</script>" bytes that would terminate
+   the script element early. Replace each occurrence with "<\/script>"
+   which JSON parsers and browsers both accept. *)
 let escape_for_inline_script s =
-  let buf = Buffer.create (String.length s) in
   let needle = "</script>" in
   let nlen = String.length needle in
   let slen = String.length s in
+  let buf = Buffer.create slen in
   let rec loop i =
-    if i + nlen > slen then Buffer.add_substring buf s i (slen - i)
-    else if String.sub s i nlen = needle then begin
+    if i >= slen then ()
+    else if matches_at s i needle then begin
       Buffer.add_string buf "<\\/script>";
       loop (i + nlen)
     end else begin
-      Buffer.add_char buf s.[i];
+      Buffer.add_char buf (String.unsafe_get s i);
       loop (i + 1)
     end
   in
@@ -297,8 +310,6 @@ let write_html_report ~ndjson_path ~out_path =
   with
   | None ->
       Error
-        (Printf.sprintf
-           "trace viewer template missing placeholder %s — was the \
-            template regenerated from a stale viewer?"
-           placeholder)
+        "viewer template missing the embed marker — rebuild speedjs \
+         after updating tools/trace_viewer.html"
   | Some html -> write_file out_path html

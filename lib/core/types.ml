@@ -305,6 +305,9 @@ let basic_call ~messages ~tools : llm_call_args =
   { messages; tools; system_override = None; tool_choice = Tc_auto;
     model = None; purpose = `Other }
 
+let llm_purpose_all : llm_purpose list =
+  [ `Planner; `Executor; `Recovery; `Summarizer; `Subagent; `Other ]
+
 let llm_purpose_to_string : llm_purpose -> string = function
   | `Planner -> "planner"
   | `Executor -> "executor"
