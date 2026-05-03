@@ -164,6 +164,53 @@ let test_chaos_llm_exception_becomes_failed () =
     "✓ Agent.execute converts Llm_api_error → Failed (workflow combinators \
      can react)"
 
+(* Per-purpose rate: only Executor calls hit chaos; everything else
+   passes through. Verifies the args.purpose -> rate dispatch in
+   Chaos.with_llm. *)
+let test_chaos_per_purpose_targets_executor () =
+  let executor_hits = ref 0 in
+  let planner_hits = ref 0 in
+  let total_calls = 200 in
+  let config =
+    {
+      Chaos.default with
+      seed = 42;
+      llm_failure_rate = 0.0;  (* default off *)
+      llm_failure_rate_for =
+        (function `Executor -> Some 1.0 | _ -> None);
+      on_inject = (fun ~kind:_ ~detail:_ -> ());
+    }
+  in
+  let chained = Chaos.with_llm config (fun _ -> canned_response) in
+  for _ = 1 to total_calls do
+    (try
+       let _ : llm_response =
+         chained
+           {
+             messages = []; tools = []; system_override = None;
+             tool_choice = Tc_auto; model = None; purpose = `Executor;
+           }
+       in
+       ()
+     with Llm_error.Llm_api_error _ -> incr executor_hits);
+    (try
+       let _ : llm_response =
+         chained
+           {
+             messages = []; tools = []; system_override = None;
+             tool_choice = Tc_auto; model = None; purpose = `Planner;
+           }
+       in
+       ()
+     with Llm_error.Llm_api_error _ -> incr planner_hits)
+  done;
+  assert (!executor_hits = total_calls);
+  assert (!planner_hits = 0);
+  print_endline
+    (Printf.sprintf
+       "✓ Chaos per-purpose: executor 100%% hit (%d), planner 0%% (%d)"
+       !executor_hits !planner_hits)
+
 let test_chaos_show () =
   assert (Chaos.show Chaos.default = "");
   let config =
@@ -187,4 +234,5 @@ let run () =
   test_chaos_seed_reproducibility ();
   test_chaos_tool_returns_typed_error ();
   test_chaos_llm_exception_becomes_failed ();
+  test_chaos_per_purpose_targets_executor ();
   test_chaos_show ()
