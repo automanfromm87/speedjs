@@ -553,11 +553,21 @@ and handle_failure_flow env state task err rest :
            env.config.max_recoveries)
       ~pending:rest
   else
-    let* decision_result = attempt (recovery_flow env state task err_str) in
+    (* Wrap recovery in [with_retry] so a transient chaos hit on the
+       recovery LLM call doesn't waste a recovery cycle on no decision.
+       The cycle counter advances on the OUTER planner outcome (post-
+       retries); retries here are just to give the planner a chance to
+       produce some decision. Llm_handler.with_retry already handles
+       retryable API errors, but won't retry [auth] / [context_window]
+       / [bad_request], which is exactly what chaos likes to inject. *)
+    let* decision_result =
+      attempt
+        (with_retry ~max_attempts:2 (recovery_flow env state task err_str))
+    in
     match decision_result with
     | Error _ ->
-        (* Recovery planner itself failed → treat as Skip to make
-           progress without infinite loop. *)
+        (* Recovery planner failed even after retries → treat as Skip
+           to make progress without an infinite loop. *)
         pivot ~decision:"SKIP" ~details:"recovery planner failed"
           ~pending:rest
     | Ok Planner.Abandon ->
